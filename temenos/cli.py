@@ -254,6 +254,98 @@ def _cmd_box_ls(args: argparse.Namespace) -> int:
     return 0
 
 
+# picks bash when the box has it, else falls back to a plain interactive sh
+_SHELL_PICK = ("if command -v bash >/dev/null 2>&1; then exec bash -i; "
+               "else exec /bin/sh -i; fi")
+
+
+def _stdin_is_tty() -> bool:
+    try:
+        return os.isatty(sys.stdin.fileno())
+    except (AttributeError, ValueError, OSError):   # stream without a real fd / closed
+        return False
+
+
+def _copy_winsize(src_fd: int, dst_fd: int) -> None:
+    import fcntl
+    import termios
+    try:
+        sz = fcntl.ioctl(src_fd, termios.TIOCGWINSZ, b"\0" * 8)
+        fcntl.ioctl(dst_fd, termios.TIOCSWINSZ, sz)
+    except OSError:
+        pass
+
+
+def _interactive_exec(ctx: dict, cmd: list[str], *, cwd: str | None = None,
+                      env: dict[str, str] | None = None) -> int:
+    """Run `cmd` in the box with the local terminal wired straight through, so REPLs and
+    full-screen TUIs behave. Bypasses the daemon's capturing exec: we run `runsc exec`
+    ourselves (same host/user as the daemon) against a freshly-allocated PTY whose slave is
+    the box process's stdio, put the real terminal in raw mode, and pump bytes between the
+    two — the docker `exec -it` model. The box-side PTY does echo/line-editing; the local
+    terminal stays raw so there's no double echo. Returns the box process's exit code.
+
+    With no controlling terminal (piped/redirected stdin), we just inherit fds directly —
+    `python3 < script` / `echo … | temenos exec -it … python3` still work."""
+    argv = list(ctx["argv"])
+    if cwd:
+        argv += ["-cwd", cwd]
+    for k, v in (env or {}).items():
+        argv += ["-env", f"{k}={v}"]
+    argv += [ctx["cid"], *cmd]
+
+    if not _stdin_is_tty():
+        return subprocess.run(argv).returncode
+    stdin_fd, stdout_fd = sys.stdin.fileno(), sys.stdout.fileno()
+
+    import pty
+    import select
+    import signal
+    import termios
+    import tty
+
+    master, slave = pty.openpty()
+    old = termios.tcgetattr(stdin_fd)
+    proc = None
+    prev_winch = signal.getsignal(signal.SIGWINCH)
+    try:
+        _copy_winsize(stdin_fd, master)
+        signal.signal(signal.SIGWINCH, lambda *_: _copy_winsize(stdin_fd, master))
+        tty.setraw(stdin_fd)
+        proc = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave,
+                                close_fds=True)
+        os.close(slave)
+        while True:
+            try:
+                ready, _, _ = select.select([stdin_fd, master], [], [], 0.2)
+            except (InterruptedError, OSError):
+                if proc.poll() is not None:
+                    break
+                continue
+            if stdin_fd in ready:
+                data = os.read(stdin_fd, 65536)
+                if data:
+                    os.write(master, data)
+            if master in ready:
+                try:
+                    data = os.read(master, 65536)
+                except OSError:        # slave hung up — box process exited
+                    break
+                if not data:
+                    break
+                os.write(stdout_fd, data)
+            elif proc.poll() is not None:
+                break
+        return proc.wait()
+    finally:
+        termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old)
+        signal.signal(signal.SIGWINCH, prev_winch)
+        os.close(master)
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
 def _cmd_exec(args: argparse.Namespace) -> int:
     from .server.client import connect_or_spawn
     cmd = list(args.cmd)
@@ -264,6 +356,10 @@ def _cmd_exec(args: argparse.Namespace) -> int:
     r = _resolve_scoped(args.name, glob=args.glob)
     client = connect_or_spawn()
     bid = _ensure_running(client, r.data_dir, args.name)
+    if args.tty:
+        # interactive: wire the local terminal into the box (REPLs, TUIs). The capturing
+        # path can't carry a PTY, so attach locally. --timeout doesn't apply here.
+        return _interactive_exec(client.attach_context(bid), cmd, cwd=args.cwd)
     res = client.exec(bid, cmd, cwd=args.cwd, timeout=args.timeout)
     sys.stdout.write(res["stdout"])
     if res["stderr"]:
@@ -272,35 +368,19 @@ def _cmd_exec(args: argparse.Namespace) -> int:
 
 
 def _cmd_shell(args: argparse.Namespace) -> int:
-    """A minimal REPL: each line runs as a fresh `sh -c` in the box. Filesystem changes
-    persist (same box); only the working dir is tracked client-side (no PTY — true
-    interactive shells arrive with `temenos claude`/MCP in Phase 5)."""
+    """Open a true interactive shell in the box (PTY passthrough): bash if present, else
+    sh. The box is persistent, so filesystem changes and cwd survive across the session and
+    across reconnects. Run `python3`, `vim`, etc. just like a local shell."""
     from .server.client import connect_or_spawn
     r = _resolve_scoped(args.name, glob=args.glob)
     client = connect_or_spawn()
     bid = _ensure_running(client, r.data_dir, args.name)
-    print(f"temenos shell -> {args.name} (box {bid}); Ctrl-D to exit")
-    cwd = "/"
-    marker = "__TEMENOS_CWD__"
-    while True:
-        try:
-            line = input(f"{cwd} $ ")
-        except EOFError:
-            print()
-            return 0
-        if not line.strip():
-            continue
-        script = (f"cd {shlex.quote(cwd)} 2>/dev/null; {line}\n"
-                  f'__rc=$?; printf "\\n{marker}%s\\n" "$(pwd)"; exit $__rc')
-        res = client.exec(bid, ["/bin/sh", "-c", script])
-        out = res["stdout"]
-        tag = "\n" + marker
-        if tag in out:
-            out, _, tail = out.rpartition(tag)
-            cwd = tail.strip() or cwd
-        sys.stdout.write(out)
-        if res["stderr"]:
-            sys.stderr.write(res["stderr"])
+    ctx = client.attach_context(bid)
+    if not _stdin_is_tty():
+        raise TemenosError("temenos shell needs an interactive terminal "
+                           "(use `temenos exec <box> -- <cmd>` for non-interactive runs)")
+    print(f"temenos shell -> {args.name} (box {bid}); Ctrl-D or `exit` to leave")
+    return _interactive_exec(ctx, ["/bin/sh", "-c", _SHELL_PICK], cwd="/")
 
 
 def _cmd_box_rm(args: argparse.Namespace) -> int:
@@ -508,6 +588,9 @@ def build_parser() -> argparse.ArgumentParser:
     _scope(ex)
     ex.add_argument("--cwd", default=None, help="working dir inside the box")
     ex.add_argument("--timeout", type=float, default=None, help="seconds before kill")
+    ex.add_argument("-i", "--interactive", "-t", "--tty", dest="tty", action="store_true",
+                    help="wire your terminal into the box (PTY) for REPLs/TUIs like "
+                         "`python3`; put it BEFORE the box name")
     ex.add_argument("cmd", nargs=argparse.REMAINDER,
                     help="the command (after the box name; an optional `--` is stripped)")
     ex.set_defaults(func=_cmd_exec)

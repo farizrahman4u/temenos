@@ -84,6 +84,9 @@ class DaemonClient:
         return self._json(self._c.post(f"/v1/boxes/{bid}/exec", json={
             "cmd": cmd, "cwd": cwd, "timeout": timeout, "stdin": stdin}))
 
+    def attach_context(self, bid: str) -> dict:
+        return self._json(self._c.get(f"/v1/boxes/{bid}/attach"))
+
     def audit(self, bid: str) -> list[dict]:
         return self._json(self._c.get(f"/v1/boxes/{bid}/audit"))  # type: ignore[return-value]
 

@@ -168,6 +168,15 @@ class Box:
         r = self.exec(["find", *self.policy.write, "-type", "f"])
         return sorted(line for line in r.stdout.splitlines() if line) if r.ok else []
 
+    def attach_context(self) -> dict:
+        """Backend pieces for an interactive (PTY) attach — see GVisorBackend.attach_context.
+        Used by the daemon to let the local CLI wire a terminal straight into the box."""
+        self._require_open()
+        fn = getattr(self._backend, "attach_context", None)
+        if fn is None:
+            raise RuntimeError(f"backend {self._backend.name!r} does not support interactive attach")
+        return fn()
+
     # -- internal ---------------------------------------------------------------------
 
     def _require_open(self) -> None:

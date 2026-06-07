@@ -89,6 +89,80 @@ def test_exec_unknown_box_errors(project_env, capsys):
 
 
 @gvisor
+def test_exec_interactive_attach_non_tty(project_env, capfd):
+    """`exec -it` with no controlling terminal inherits fds directly — proves the daemon
+    attach-context endpoint + local `runsc exec` reconstruction work end to end."""
+    assert main(["create", "default"]) == 0
+    capfd.readouterr()
+    assert main(["exec", "-it", "default", "--", "python3", "-c", "print(6*7)"]) == 0
+    assert "42" in capfd.readouterr().out
+
+
+@gvisor
+def test_shell_drives_real_repl_over_pty(project_env, monkeypatch):
+    """A genuine interactive REPL: drive `python3` over a PTY and confirm it evaluates
+    input instead of exiting on EOF (the bug this fixes)."""
+    import os
+    import pty
+    import select
+    import threading
+    import time
+
+    from temenos import cli
+
+    assert main(["create", "default"]) == 0
+
+    master, slave = pty.openpty()
+
+    class _FakeStd:
+        def __init__(self, fd: int) -> None:
+            self._fd = fd
+
+        def fileno(self) -> int:
+            return self._fd
+
+    monkeypatch.setattr(cli.sys, "stdin", _FakeStd(slave))
+    monkeypatch.setattr(cli.sys, "stdout", _FakeStd(slave))
+
+    def feed() -> None:
+        time.sleep(2.0)                       # let the REPL come up inside the box
+        os.write(master, b"print(6 * 7)\n")
+        time.sleep(1.0)
+        os.write(master, b"exit()\n")
+
+    t = threading.Thread(target=feed, daemon=True)
+    t.start()
+    rc = cli._interactive_exec(_box_attach_ctx("default"), ["python3"])
+    os.close(slave)
+
+    out = b""
+    while True:
+        ready, _, _ = select.select([master], [], [], 0.5)
+        if not ready:
+            break
+        try:
+            chunk = os.read(master, 65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        out += chunk
+    os.close(master)
+    assert b"42" in out
+    assert rc == 0
+
+
+def _box_attach_ctx(name: str) -> dict:
+    from temenos.cli import _resolve_scoped
+    from temenos.server.client import connect_or_spawn
+
+    r = _resolve_scoped(name, glob=False)
+    client = connect_or_spawn()
+    from temenos.manager import box_id
+    return client.attach_context(box_id(r.data_dir))
+
+
+@gvisor
 def test_claude_dry_run_wires_mcp_and_bans_natives(project_env, capsys):
     import json
     repo = project_env

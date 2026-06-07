@@ -235,6 +235,15 @@ code, not two products. The isolation invariant — **no writable mount is ever 
 boxes** — holds today; tenant-scoped tokens and aggregate quotas are the platform-tier
 [roadmap](#-status).
 
+## 📚 Documentation
+
+Full docs live in [`docs/`](https://github.com/farizrahman4u/temenos/tree/main/docs):
+
+- [Concepts](https://github.com/farizrahman4u/temenos/blob/main/docs/concepts.md) — boxes, policies, the daemon, scope, checkpoints, images
+- [CLI reference](https://github.com/farizrahman4u/temenos/blob/main/docs/cli.md) · [Python API](https://github.com/farizrahman4u/temenos/blob/main/docs/python-api.md)
+- [Agents & MCP](https://github.com/farizrahman4u/temenos/blob/main/docs/agents.md) — `temenos claude` and wiring other harnesses
+- [Box images](https://github.com/farizrahman4u/temenos/blob/main/docs/images.md) · [Security model](https://github.com/farizrahman4u/temenos/blob/main/docs/security.md) · [Configuration](https://github.com/farizrahman4u/temenos/blob/main/docs/configuration.md)
+
 ## 🧠 The one design decision
 
 **The agent runs on the host; only what it *executes* runs in a box.** That single split is

@@ -92,6 +92,12 @@ def create_app(manager: BoxManager | None = None, token: str | None = None) -> F
         return manager.get(bid).exec(body.cmd, cwd=body.cwd, timeout=body.timeout,
                                      stdin=body.stdin).to_dict()
 
+    @app.get("/v1/boxes/{bid}/attach", dependencies=[Depends(auth)])
+    def attach_box(bid: str) -> dict:
+        # Pieces for a LOCAL interactive `runsc exec` (PTY passthrough). Only meaningful to
+        # a same-host, same-user client (the CLI) — a PTY can't stream over this REST path.
+        return manager.get(bid).attach_context()
+
     @app.get("/v1/boxes/{bid}/audit", dependencies=[Depends(auth)])
     def audit_box(bid: str) -> list[dict]:
         return manager.get(bid).audit.to_dicts()

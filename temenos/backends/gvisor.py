@@ -263,6 +263,18 @@ class GVisorBackend(Backend):
             return self._result(out, b"timeout", 124, started)
         return self._result(r.stdout, r.stderr, r.returncode, started)
 
+    def attach_context(self) -> dict:
+        """Argv prefix + container id for a LOCAL, interactive `runsc exec` (PTY
+        passthrough). The capturing `exec()` above can't carry an interactive terminal —
+        it buffers stdout and never connects stdin — so REPLs (python3, bash -i) die on
+        immediate EOF. Instead the daemon hands these pieces to the same-host, same-user
+        CLI, which runs `runsc exec` itself with the user's terminal wired straight
+        through (gVisor passes the host TTY fd into the sandbox; verified). The CLI
+        appends `-cwd`/`-env`, then `<cid> <cmd>`."""
+        if self._cid is None or not self.alive():
+            raise BackendError("box is not running; cannot attach")
+        return {"argv": self._ctl_globals() + ["exec"], "cid": self._cid}
+
     def _result(self, out: bytes, err: bytes, code: int, started: float) -> ExecResult:
         limit = self._policy.max_output_bytes if self._policy else 10 * 1024 * 1024
         truncated = len(out) > limit
