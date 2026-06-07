@@ -28,14 +28,82 @@ A shell that tries to `rm -rf ~`, read `~/.ssh/id_rsa`, or `curl evil.com` is co
 not because the model promised to behave, but because the sandbox boundary won't let it. The
 agent is trusted; the *code it runs* is not. 🛡️
 
+**That's one box. temenos is built to run a thousand.** The same engine that wraps a single
+agent on your laptop is a multi-box control plane — the point isn't sandboxing *one* helpful
+assistant, it's containment for when **human approval stops scaling** (see ["one box → a
+swarm → a platform"](#-one-box--a-swarm--a-platform) below).
+
 > *temenos* (τέμενος): a bounded precinct — a space set apart with a clear edge.
 
 ---
+
+## 🪜 One box → a swarm → a platform
+
+temenos reveals as much complexity as you bring to it. Same `Policy → Box` core at every
+rung; you just point more agents at more boxes.
+
+### Rung 1 — one box (start here)
+
+```bash
+temenos claude            # attach Claude to a box in this repo; natives banned
+```
+
+The approachable entry point: a single agent, your repo mounted live, a box underneath. Great
+for trying temenos, demos, and "let it run unattended on this branch overnight." This is the
+showcase — but it's the *first* rung, not the destination.
+
+### Rung 2 — a swarm (the point)
+
+When you fan a task across **dozens of agents in parallel**, approving each tool call by hand
+is a non-starter — so you run them in **allow-all ("yolo") mode**. That's exactly where
+containment-by-construction earns its keep: an agent can yolo all it wants because **there's
+nothing dangerous to allow** — every action it takes structurally lands in a policy'd box.
+
+```python
+from temenos import Policy
+from temenos.manager import BoxManager
+
+mgr = BoxManager()
+policy = Policy(network=False, write=["/scratch"])      # secure by default; opt into capability
+
+# one contained box per agent — the same boundary, fifty times over
+ids = [mgr.create(f"/srv/boxes/agent-{i}", policy, name=f"agent-{i}") for i in range(50)]
+
+for bid in ids:
+    box = mgr.get(bid)
+    box.write_file("/scratch/task.py", "...")
+    print(box.exec(["python3", "/scratch/task.py"]).stdout)   # ExecResult: stdout/exit/ms
+
+mgr.shutdown()    # checkpoints (if enabled) + tears down the whole fleet
+```
+
+gVisor is the density sweet spot a swarm needs: a VM per agent is too heavy, a plain container
+is a weaker boundary, a **box per agent is cheap *and* strong**. (Fan-out sugar — `mgr.map(...)`
+over N boxes — is on the [roadmap](#-status); the explicit loop above works today.)
+
+### Rung 3 — a platform (the ceiling)
+
+The same registry that runs your local swarm is the **multi-tenant control plane**. One
+per-user daemon supervises every box, exposes a REST control plane (the CLI) and a **per-box
+MCP data plane** (`/mcp/<box-id>`, scoped token) for the agents. A "tenant" and an "agent" are
+the same abstraction — so "run my swarm" and "run many customers' agents on untrusted code"
+are **the same build**, not two products.
+
+```bash
+temenos serve --port 8839     # the daemon: REST control + per-box MCP, supervising N boxes
+```
+
+Per-tenant authz and quotas are the platform-tier work in progress (see [Status](#-status));
+the box-per-owner isolation invariant — **no writable mount is ever shared across boxes** — is
+in place today.
 
 ## ✨ Highlights
 
 - 🏛️ **Agent on the host, execution in a box.** No broken updates, no API keys plumbed into a
   container, no re-auth. Only the code the agent *runs* is sandboxed.
+- 🐝 **Built for fleets, not just one helper.** One box or a thousand — the multi-box
+  `BoxManager` is the same code path whether it's your overnight swarm or a multi-tenant
+  platform. Allow-all is safe because containment is structural.
 - 🔒 **Real isolation, not a syscall allowlist.** gVisor is a userspace kernel — the host
   filesystem is invisible beyond what policy mounts, network is off by default, and most
   kernel-CVE surface is intercepted before it reaches the host.
@@ -54,11 +122,12 @@ agent is trusted; the *code it runs* is not. 🛡️
 
 ## 🤔 What it is
 
-A runtime that gives a **trusted agent** an *untrusted-code execution surface*. You point a
-harness (Claude Code today; any MCP-capable agent in principle) at a **box** and remove its
-host-touching tools. The agent keeps editing your real files and calling its model — but
-every `bash`/`python`/file/network action it takes happens inside gVisor, under a policy you
-set, observable and reversible.
+A runtime that gives **trusted agents** an *untrusted-code execution surface* — whether
+that's one agent or a swarm of them. You point a harness (Claude Code today; any MCP-capable
+agent in principle) at a **box** and remove its host-touching tools. The agent keeps editing
+your real files and calling its model — but every `bash`/`python`/file/network action it takes
+happens inside gVisor, under a policy you set, observable and reversible. Run that for one
+repo, or run it fifty times in parallel under one daemon — same boundary either way.
 
 ## 🚫 What it is NOT
 
@@ -68,7 +137,7 @@ set, observable and reversible.
 | A VM-per-task sandbox | The agent stays on the **host** (auth, updates, model API intact). Spinning a VM per task throws all that away; temenos boxes only what runs. |
 | A seccomp / AppArmor filter | gVisor is a full userspace kernel, not a syscall allowlist bolted onto the host kernel — a categorically larger isolation boundary. |
 | A defense against a malicious *agent* | The threat model trusts the agent binary. temenos contains the untrusted **code the agent runs**, not the agent itself. |
-| A network firewall | v1 network is a toggle: **off** (isolated) or **full passthrough** (no filtering). Filtered per-host egress is post-v1. |
+| A network firewall | v1 network is a toggle: **off** (isolated) or **full passthrough** (no filtering). Filtered per-host egress is post-v1 — and the load-bearing gap for adversarial fleets (see limits). |
 
 ## ⚖️ How it compares
 
@@ -77,37 +146,41 @@ set, observable and reversible.
 | **Isolation boundary** | userspace kernel (gVisor) | shared host kernel + ns | hardware | shared kernel + seccomp/ns | none |
 | **Agent stays on host** (auth/updates intact) | ✅ | ⚠️ (boxed → loses host context) | ❌ | ⚠️ partial | ✅ |
 | **Sole-execution-path for an agent** | ✅ built-in (deny natives + MCP) | 🔧 DIY | 🔧 DIY | 🔧 DIY | ❌ (trust the model) |
+| **Fleet control plane** (N boxes, one daemon) | ✅ `BoxManager` | 🔧 DIY (compose/k8s) | 🔧 DIY | ❌ | ❌ |
 | **Kernel-CVE surface** | low | high | low | high | n/a |
 | **Per-task object** (named, checkpointed, inspectable) | ✅ | ✅ (containers) | ⚠️ heavy | ❌ | ❌ |
 | **Setup per task** | low (rootless, a box dir) | medium | high | low | none |
 
 **In short:** containers and VMs isolate *whole programs you ship*; firejail filters syscalls
-on the *host* kernel; prompt-level guardrails ask nicely. temenos isolates *the code a trusted
-agent runs*, keeps the agent on the host, and makes the box a first-class, inspectable object.
-It builds on [gVisor](https://gvisor.dev) and the [Model Context Protocol](https://modelcontextprotocol.io). 🙂
+on the *host* kernel; prompt-level guardrails ask nicely. temenos isolates *the code trusted
+agents run*, keeps the agents on the host, and makes each box a first-class, inspectable object
+you can run one of — or a fleet of. It builds on [gVisor](https://gvisor.dev) and the
+[Model Context Protocol](https://modelcontextprotocol.io). 🙂
 
 ## 🧩 How it works
 
 ```
-   you ──► claude (host)
+   you ──► claude (host)            (×N agents, in a swarm)
               │  native tools BANNED (--disallowedTools, --strict-mcp-config)
               │  only mcp__temenos__* ALLOWED
               ▼
         temenos daemon  ──HTTP /mcp/<box-id>──►  Box (gVisor / runsc)
-        (one per user)                            • host /usr,/etc bound read-only
-                                                  • repo mounted (live-writable by default)
+        (one per user,                            • host /usr,/etc bound read-only
+         supervises every box)                    • repo mounted (live-writable by default)
                                                   • network off · mem/cpu/pid capped
                                                   • writes land in an overlay
 ```
 
 A **box** = a `Policy` + a gVisor runtime + a data dir. **One daemon per user** auto-spawns on
-first use and serves a REST control plane (the CLI) and a per-box MCP data plane (the agent).
-Boxes are keyed by the hash of their data dir, so two repos' `default` boxes never collide.
-For the full design, decisions, and verification log, see [`plan.md`](https://github.com/farizrahman4u/temenos/blob/main/plan.md).
+first use and supervises *every* box, serving a REST control plane (the CLI) and a per-box MCP
+data plane (the agents). Boxes are keyed by the hash of their data dir, so two repos' `default`
+boxes — or fifty swarm agents — never collide. For the full design, decisions, and verification
+log, see [`plan.md`](https://github.com/farizrahman4u/temenos/blob/main/plan.md).
 
 ## 📦 Install
 
-temenos is **Linux + gVisor** for v1 (macOS is on the roadmap).
+temenos is **Linux + gVisor** for v1; a macOS (Seatbelt) backend is designed — see
+[`macos_plan.md`](https://github.com/farizrahman4u/temenos/blob/main/macos_plan.md).
 
 **1. gVisor (`runsc`)** — the sandbox. ([official guide](https://gvisor.dev/docs/user_guide/install/))
 
@@ -148,7 +221,7 @@ systemd-run:        yes             # required to ENFORCE memory/cpu limits (see
 
 ## 🚀 Quickstart
 
-### The project flow (git-style)
+### Rung 1 — the project flow (git-style, one box)
 
 ```bash
 cd ~/code/my-repo
@@ -166,7 +239,7 @@ A bare box name resolves **project-first** (`.temenos/<name>`, walking up from C
 **global** (`~/.local/share/temenos/boxes/<name>`); a project box shadows a global one of the
 same name (with a warning).
 
-### Attach Claude Code to a box
+**Attach Claude Code to a box:**
 
 ```bash
 temenos claude                       # box 'default' in this repo
@@ -178,17 +251,27 @@ temenos claude -- --model opus       # args after `--` go to claude
 The repo mounts **live-writable**, so the agent's edits land in your real files — the sandbox
 contains *execution*, not the trusted agent's edits. `--ephemeral` flips the repo to read-only.
 
-### The Python API (the core; CLI/MCP are thin layers over it)
+### Rung 2 — a swarm (the Python core)
+
+The CLI and MCP server are thin layers over the same `Box`/`BoxManager` you can drive directly:
 
 ```python
 from temenos import Box, Policy
+from temenos.manager import BoxManager
 
+# one box, directly
 with Box("demo", Policy(network=False, write=["/home/me/out"])) as box:
     box.write_file("/home/me/out/run.py", "print(6 * 7)\n")
     r = box.exec(["python3", "/home/me/out/run.py"])
     print(r.stdout, r.exit_code)        # "42\n", 0
+    box.exec(["cat", "/etc/shadow"]).ok # -> False  (host invisible)
 
-    box.exec(["cat", "/etc/shadow"]).ok          # -> False  (host invisible)
+# a fleet, via the registry the daemon owns
+mgr = BoxManager()
+ids = [mgr.create(f"/srv/boxes/agent-{i}", Policy()) for i in range(50)]
+for bid in ids:
+    print(mgr.get(bid).exec(["echo", "hi"]).stdout.strip())
+mgr.shutdown()
 ```
 
 `Policy` is frozen and **secure by default** (`Policy()` = no network, no host writes, tight
@@ -201,9 +284,10 @@ limits). `restrict()` derives child policies that can only *narrow* — widening
 what makes temenos both usable and safe: the agent keeps its identity, updates, and model
 access (so it actually works), while every command it issues crosses a hard sandbox edge
 (so it can't hurt you). Everything else — the MCP data plane, the banned-natives wiring, the
-checkpointing box — exists to make that split airtight and the "code" the agent runs the
-**sole execution path**. Reading your project directly, or shelling out on the host, would be
-the spillover temenos prevents.
+checkpointing box, the multi-box registry — exists to make that split airtight and the "code"
+the agent runs the **sole execution path**. And because that boundary is *structural*, not a
+promise, the split holds identically whether you supervise one agent by hand or run a hundred
+in allow-all mode: the box is the enforcement, not the human.
 
 ## 🗂️ CLI reference
 
@@ -232,24 +316,29 @@ the spillover temenos prevents.
 The **agent is trusted** (you installed it; it authenticates as you; it isn't trying to
 escape). The **code it runs is untrusted** — model-authored shell/python that may be buggy,
 prompt-injected, or hostile. temenos's job is the *sole-execution-path* guarantee: every bit
-of that code goes through a box, and a box can't touch the host beyond its policy.
+of that code goes through a box, and a box can't touch the host beyond its policy. That
+guarantee is what lets you take humans out of the loop at fleet scale.
 
 | Property | Status (v1, gVisor) |
 |---|---|
 | Filesystem escape | **blocked** — host invisible beyond policy mounts; `/proc/1/root` is the box |
 | Host writes outside policy | **blocked** — `/usr`,`/etc` read-only; writes go to an overlay |
 | Network exfiltration | **blocked** when `network=off` (isolated netns) |
+| Cross-box crosstalk | **blocked** — no writable mount is ever shared between boxes |
 | Kernel-CVE surface | **mostly blocked** — gVisor intercepts syscalls in userspace |
 | Memory/CPU/pid exhaustion | **enforced** via a per-box `systemd` scope (needs delegation — below) |
 
 **Limits you should know about:**
 
 - **Network is a toggle, not a firewall.** `--net` is **full host passthrough — no filtering**
-  (localhost, LAN, cloud metadata, arbitrary egress). Operator opt-in, unsafe for adversarial
-  multi-tenant use. Filtered egress is post-v1.
+  (localhost, LAN, cloud metadata, arbitrary egress). This is the **load-bearing gap for
+  adversarial fleets**: a swarm of network-on boxes is an exfiltration surface multiplied by N.
+  Run swarm boxes `network=off` where you can; filtered per-host egress is post-v1.
 - **Resource limits need systemd user-cgroup delegation.** Without it, limits **degrade to
   unenforced with a warning** (`temenos doctor` shows the mode) — don't run adversarial work
   there.
+- **Per-tenant authz/quotas are in progress.** The box-per-owner isolation invariant holds
+  today; tenant-scoped tokens and aggregate quotas are the platform-tier roadmap.
 - **WSL2 uses the `ptrace` platform** (no `/dev/kvm`). Slower, but the security model — the
   gVisor sentry — is identical to kvm/systrap.
 - **Side channels** between co-resident boxes are out of scope for v1.
@@ -262,14 +351,16 @@ new holes). A config isn't "supported" until it's green.
 
 ```
 Layer 3  surfaces      server/ (FastAPI REST + per-box MCP) · cli.py
-Layer 2½ registry      manager.py (BoxManager: ids, lifecycle, checkpoint loop)
+Layer 2½ registry      manager.py (BoxManager: ids, fleet lifecycle, checkpoint loop)
 Layer 2  box           box.py (exec/read/write/list, audit, checkpoint)
 Layer 1  backend       backends/ (gVisor: OCI bundle, held-run+exec, overlay, systemd scope)
 Layer 0  data          policy.py · result.py · storage.py · exceptions.py  (pure, no OS calls)
 ```
 
-Lower layers never import higher ones; REST, MCP, and the CLI are all the same
-`Policy → Box → ExecResult` path. Delete `server/` and the core still works.
+`BoxManager` (Layer 2½) is the hinge: it's the local-swarm registry *and* the multi-tenant
+control plane — one piece of code, two reach. Lower layers never import higher ones; REST, MCP,
+and the CLI are all the same `Policy → Box → ExecResult` path. Delete `server/` and the core
+still works.
 
 ## 🧪 Development
 
@@ -285,8 +376,14 @@ Tests that need gVisor / mmdebstrap / network are gated and skip cleanly without
 ## 📍 Status
 
 **Pre-1.0** (`0.1.0`). v1 is feature-complete and leak-tested on Linux + gVisor; the API may
-still shift before 1.0. Roadmap: filtered egress, a macOS backend, true diff-vs-original, an
-interactive PTY/attach, persisted audit logs.
+still shift before 1.0. Roadmap, ordered by where the value is:
+
+1. **Fleet fan-out ergonomics** — `mgr.map(...)` over N boxes, batch lifecycle, aggregate audit.
+2. **Filtered network egress** — per-host SNI/allowlist proxy, so swarm boxes get *contained*
+   network instead of all-or-nothing (the biggest gap for adversarial fleets).
+3. **Per-tenant authz & quotas** — tenant-scoped tokens, aggregate caps + backpressure.
+4. **macOS (Seatbelt) backend** — see [`macos_plan.md`](https://github.com/farizrahman4u/temenos/blob/main/macos_plan.md).
+5. True diff-vs-original, an interactive PTY/attach, persisted audit logs.
 
 ## 🙏 Credits
 
@@ -295,8 +392,9 @@ temenos stands on:
 - [**gVisor**](https://gvisor.dev) — the userspace kernel that is the actual sandbox.
 - [**Model Context Protocol**](https://modelcontextprotocol.io) — the agent-facing tool plane.
 
-temenos's contribution is the *composition*: a trusted agent on the host, an untrusted-code
-box underneath, and the wiring that makes the box the sole execution path.
+temenos's contribution is the *composition*: trusted agents on the host, untrusted-code boxes
+underneath, one daemon that scales it from a single repo to a fleet, and the wiring that makes
+each box the sole execution path.
 
 ## 📄 License
 
