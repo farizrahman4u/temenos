@@ -6,10 +6,7 @@ uses a real spawned daemon over real HTTP (most faithful to the deployed path).
 """
 from __future__ import annotations
 
-import os
-import signal
 import socket
-import time
 
 import pytest
 
@@ -27,7 +24,7 @@ def _free_port() -> int:
 
 
 @pytest.fixture
-def daemon(tmp_path, monkeypatch):
+def daemon(tmp_path, monkeypatch, stop_daemon):
     """A real spawned daemon on a free port; yields (url, token, DaemonClient)."""
     monkeypatch.setenv("TEMENOS_HOME", str(tmp_path / "daemon"))
     monkeypatch.setenv("TEMENOS_DATA", str(tmp_path / "data"))
@@ -37,12 +34,7 @@ def daemon(tmp_path, monkeypatch):
     try:
         yield info["url"], info["token"], cl
     finally:
-        if info:
-            try:
-                os.kill(info["pid"], signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            time.sleep(1.0)
+        stop_daemon()
 
 
 def test_unknown_box_is_rejected(daemon):

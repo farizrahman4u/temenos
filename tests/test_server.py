@@ -1,10 +1,7 @@
 """Phase 3 — FastAPI daemon + connect-or-spawn."""
 from __future__ import annotations
 
-import os
-import signal
 import socket
-import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -53,7 +50,7 @@ def _free_port() -> int:
     s.close()
     return port
 
-def test_connect_or_spawn_starts_single_daemon(tmp_path, monkeypatch):
+def test_connect_or_spawn_starts_single_daemon(tmp_path, monkeypatch, stop_daemon):
     monkeypatch.setenv("TEMENOS_HOME", str(tmp_path))
     port = _free_port()
     from temenos.server import client
@@ -63,10 +60,4 @@ def test_connect_or_spawn_starts_single_daemon(tmp_path, monkeypatch):
         assert cl.list_boxes() == []
         assert client.connect() is not None         # a second call attaches, doesn't respawn
     finally:
-        info = client.read_info()
-        if info:
-            try:
-                os.kill(info["pid"], signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            time.sleep(1.0)
+        stop_daemon()

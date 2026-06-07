@@ -7,7 +7,6 @@ daemon is forced onto a free port and SIGTERM'd in teardown.
 from __future__ import annotations
 
 import os
-import signal
 import socket
 import time
 
@@ -28,7 +27,7 @@ def _free_port() -> int:
 
 
 @pytest.fixture
-def project_env(tmp_path, monkeypatch):
+def project_env(tmp_path, monkeypatch, stop_daemon):
     """Isolated $HOME + daemon + global data, with the daemon forced onto a free port."""
     home = tmp_path / "home"
     repo = home / "repo"
@@ -46,13 +45,7 @@ def project_env(tmp_path, monkeypatch):
     try:
         yield repo
     finally:
-        info = client.read_info()
-        if info:
-            try:
-                os.kill(info["pid"], signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            time.sleep(1.0)
+        stop_daemon()
 
 
 @gvisor
