@@ -343,7 +343,7 @@ Tests that need gVisor / mmdebstrap / network are gated and skip cleanly without
 
 ## 📍 Status
 
-**Pre-1.0** (`0.1.0`). v1 is feature-complete and leak-tested on Linux + gVisor; the API may
+**Pre-1.0** (`0.2.0`). v1 is feature-complete and leak-tested on Linux + gVisor; the API may
 still shift before 1.0. Roadmap, ordered by where the value is:
 
 1. **Fleet fan-out ergonomics** — `mgr.map(...)` over N boxes, batch lifecycle, aggregate audit.
