@@ -86,3 +86,24 @@ def test_project_create_exec_ls_audit_rm(project_env, capsys):
 def test_exec_unknown_box_errors(project_env, capsys):
     assert main(["exec", "ghost", "--", "true"]) == 1
     assert "no such box" in capsys.readouterr().err
+
+
+@gvisor
+def test_claude_dry_run_wires_mcp_and_bans_natives(project_env, capsys):
+    import json
+    repo = project_env
+    assert main(["claude", "--box", "default", "--dry-run", "--", "--model", "opus"]) == 0
+    out = capsys.readouterr().out
+
+    cfg_path = repo / ".temenos" / "default" / "mcp.json"
+    assert cfg_path.exists()
+    cfg = json.loads(cfg_path.read_text())
+    srv = cfg["mcpServers"]["temenos"]
+    assert srv["type"] == "http" and srv["url"].endswith("/mcp/" + out.split("id=")[1].split()[0])
+    assert srv["headers"]["Authorization"].startswith("Bearer ")
+
+    # the launch line: strict config, natives denied, only temenos tools allowed
+    assert "--strict-mcp-config" in out
+    assert "--disallowedTools" in out and "Bash" in out and "WebFetch" in out
+    assert "--allowedTools" in out and "mcp__temenos__exec" in out
+    assert "--model opus" in out                      # user args forwarded after `--`

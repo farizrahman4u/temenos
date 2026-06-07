@@ -684,9 +684,21 @@ that mode.
   `/v1/boxes/{id}/audit` and `/writes`. `shell` is a non-PTY REPL (client-side cwd tracking;
   true interactivity lands with MCP in Phase 5). Tests: pure discovery/resolution + a
   gVisor-gated `create→exec→ls→audit→rm` e2e through `main()` — **109 green**.
-- **Phase 5 — MCP + `temenos claude` + durability:** MCP at `/mcp/<id>` (per-box token) +
-  the §8e Claude wiring (ban native tools); checkpoint-on-stop / restore-on-use for project
-  boxes; the leak-test (§10) as the acceptance gate.
+- **Phase 5 — MCP + `temenos claude` + leak-test. ✅ DONE.** `server/mcp.py`: one FastMCP
+  (`stateless_http`, `json_response`, DNS-rebinding off) with box-scoped tools
+  `exec`/`read`/`write`/`list` (→ `mcp__temenos__*`; no create/delete/commit tool); a
+  `BoxMCPRouter` ASGI app mounted at `/mcp` pulls the id off `/mcp/<id>`, checks the daemon
+  Bearer token, verifies the box, and binds the request to it via a contextvar (verified to
+  reach FastMCP's stateless handler + sync-tool threadpool). `create_app` lifespan runs the
+  session manager. `temenos claude [--box] [box-flags] [-- claude-args]`: ensure project box
+  → write `<box>/mcp.json` (http url + Bearer) → `os.execvp` claude with
+  `--strict-mcp-config --mcp-config … --disallowedTools <natives> --allowedTools
+  mcp__temenos__*` (real flags verified against claude 2.1.168); `--dry-run` prints instead.
+  `temenos doctor` (gVisor/platform/mmdebstrap/systemd). Tests: **official mcp client**
+  drives a real box (init/list/exec/read/write/list) + 401/404 routing; claude dry-run wires
+  config + bans; **leak battery `tests/leak/`** (no host write, host secrets invisible incl.
+  `/proc/1/root` pivot, no network, /proc-is-box, D6 memory cap OOM-kills). **118 green, 2
+  skipped.** (Durability already shipped in Phase 3/§8f: box-dir checkpoint + restore-on-use.)
 - **Phase 6 — polish & release:** README (threat model, multi-tenancy, ptrace/WSL notes,
   the systemd-delegation requirement for limits (D6), and the one honest limit: no v1
   network filtering), examples (sample Claude config), PyPI.

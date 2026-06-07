@@ -324,6 +324,78 @@ def _cmd_diff(args: argparse.Namespace) -> int:
     return 0
 
 
+# Native host-touching tools Claude must NOT use — its sole execution path is the box's
+# MCP tools. `--strict-mcp-config` also stops a stray .mcp.json re-adding a host server.
+_BANNED_NATIVE = ("Bash,Read,Write,Edit,MultiEdit,NotebookEdit,Glob,Grep,"
+                  "WebFetch,WebSearch,Task")
+_ALLOWED_TEMENOS = ("mcp__temenos__exec,mcp__temenos__read,"
+                    "mcp__temenos__write,mcp__temenos__list")
+
+
+def _cmd_claude(args: argparse.Namespace) -> int:
+    """Attach a Claude Code session to a box: Claude runs on the host (auth/model API keep
+    working) but every host-touching native tool is banned — its only execution path is the
+    box's MCP tools (plan §8e)."""
+    from .project import DEFAULT_BOX, ensure_project, resolve_box
+    from .server.client import connect_or_spawn, read_info
+    name = args.box or DEFAULT_BOX
+    if args.glob:
+        project = None
+        r = resolve_box(name, prefer="global")
+    else:
+        project = ensure_project()
+        if project.created:
+            print(f"initialized project at {project.temenos_dir}")
+        r = resolve_box(name, prefer="project")
+        if r.shadows_global:
+            _warn(f"project box {name!r} shadows a global box of the same name")
+    policy = _policy_from_args(args, project)
+    client = connect_or_spawn()
+    bid = client.create_box(r.data_dir, policy.to_dict(), name=name)["id"]
+
+    info = read_info() or {}
+    cfg = {"mcpServers": {"temenos": {
+        "type": "http",
+        "url": f"{info.get('url')}/mcp/{bid}",
+        "headers": {"Authorization": f"Bearer {info.get('token')}"}}}}
+    cfg_path = os.path.join(r.data_dir, "mcp.json")     # box-local, gitignored
+    with open(cfg_path, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+    claude_args = list(args.claude_args)
+    if claude_args and claude_args[0] == "--":
+        claude_args = claude_args[1:]
+    argv = ["claude", "--strict-mcp-config", "--mcp-config", cfg_path,
+            "--disallowedTools", _BANNED_NATIVE, "--allowedTools", _ALLOWED_TEMENOS,
+            *claude_args]
+
+    if args.dry_run:
+        print(f"box {name!r} [{r.scope}] id={bid}")
+        print(f"mcp config: {cfg_path}")
+        print(" ".join(shlex.quote(a) for a in argv))
+        return 0
+    if shutil.which("claude") is None:
+        raise TemenosError("`claude` not found on PATH (install Claude Code, or use --dry-run)")
+    os.execvp("claude", argv)        # replace this process so Claude owns the TTY
+    return 0                          # unreachable
+
+
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    """Quick capability check: gVisor + platform, mmdebstrap, systemd memory enforcement."""
+    from .backends.gvisor import GVisorBackend
+    ok = GVisorBackend.is_available()
+    print(f"gVisor (runsc):     {'yes' if ok else 'NO'}")
+    if ok:
+        try:
+            print(f"  platform:         {GVisorBackend().detect_platform()}")
+        except Exception as e:  # noqa: BLE001
+            print(f"  platform:         (probe failed: {e})")
+    print(f"mmdebstrap:         {'yes' if shutil.which('mmdebstrap') else 'no (image builds limited)'}")
+    have_systemd = shutil.which("systemd-run") is not None
+    print(f"systemd-run:        {'yes' if have_systemd else 'no — resource limits UNENFORCED'}")
+    return 0 if ok else 1
+
+
 def _add_box_flags(p: argparse.ArgumentParser) -> None:
     """Box-creation flags shared by `create` (and forwarded by `temenos claude` later)."""
     p.add_argument("--image", default=None, help="boot from a built image (see `temenos image`)")
@@ -413,6 +485,18 @@ def build_parser() -> argparse.ArgumentParser:
     df = sub.add_parser("diff", help="list files under a box's write paths")
     df.add_argument("name")
     df.set_defaults(func=_cmd_diff)
+
+    cl = sub.add_parser("claude", help="attach a Claude Code session to a box (natives banned)")
+    cl.add_argument("--box", default=None, help="box name (default: 'default')")
+    cl.add_argument("--dry-run", dest="dry_run", action="store_true",
+                    help="print the box id, MCP config path and claude command, then exit")
+    _add_box_flags(cl)
+    cl.add_argument("claude_args", nargs=argparse.REMAINDER,
+                    help="args passed through to claude (after an optional `--`)")
+    cl.set_defaults(func=_cmd_claude)
+
+    doc = sub.add_parser("doctor", help="check gVisor/platform/limits capability")
+    doc.set_defaults(func=_cmd_doctor)
     return p
 
 

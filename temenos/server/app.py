@@ -8,6 +8,7 @@ file). The per-box MCP sub-app mounts here in Phase 5.
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
@@ -15,6 +16,7 @@ from pydantic import BaseModel
 from ..exceptions import BoxNotFound, TemenosError
 from ..manager import BoxManager
 from ..policy import Policy
+from .mcp import BoxMCPRouter
 
 
 class CreateBox(BaseModel):
@@ -34,8 +36,19 @@ class ExecBody(BaseModel):
 def create_app(manager: BoxManager | None = None, token: str | None = None) -> FastAPI:
     manager = manager or BoxManager()
     token = token if token is not None else os.environ.get("TEMENOS_DAEMON_TOKEN")
-    app = FastAPI(title="temenos", docs_url=None, redoc_url=None)
+
+    # Per-box MCP data plane mounted at /mcp/<id>. Its streamable session manager needs a
+    # running task group, supplied by the app lifespan below.
+    mcp_router = BoxMCPRouter(manager, token)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        async with mcp_router.session_manager.run():
+            yield
+
+    app = FastAPI(title="temenos", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.manager = manager
+    app.mount("/mcp", mcp_router)
 
     def auth(authorization: str = Header(default="")) -> None:
         if token and authorization != f"Bearer {token}":
