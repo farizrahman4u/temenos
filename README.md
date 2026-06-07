@@ -8,7 +8,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/temenos.svg)](https://pypi.org/project/temenos/)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/farizrahman4u/temenos/blob/main/LICENSE)
 [![Built on gVisor + MCP](https://img.shields.io/badge/built%20on-gVisor%20%2B%20MCP-8a2be2.svg)](#-how-it-works)
 [![leak-tested](https://img.shields.io/badge/containment-leak--tested-2ea44f.svg)](#-threat-model--honest-limits)
 
@@ -103,11 +103,11 @@ It builds on [gVisor](https://gvisor.dev) and the [Model Context Protocol](https
 A **box** = a `Policy` + a gVisor runtime + a data dir. **One daemon per user** auto-spawns on
 first use and serves a REST control plane (the CLI) and a per-box MCP data plane (the agent).
 Boxes are keyed by the hash of their data dir, so two repos' `default` boxes never collide.
-For the full design, decisions, and verification log, see [`plan.md`](plan.md).
+For the full design, decisions, and verification log, see [`plan.md`](https://github.com/farizrahman4u/temenos/blob/main/plan.md).
 
 ## 📦 Install
 
-temenos is **Linux + gVisor** for v1 (macOS is on the roadmap — see `macos_plan.md`).
+temenos is **Linux + gVisor** for v1 (macOS is on the roadmap).
 
 **1. gVisor (`runsc`)** — the sandbox. ([official guide](https://gvisor.dev/docs/user_guide/install/))
 
@@ -193,7 +193,7 @@ with Box("demo", Policy(network=False, write=["/home/me/out"])) as box:
 
 `Policy` is frozen and **secure by default** (`Policy()` = no network, no host writes, tight
 limits). `restrict()` derives child policies that can only *narrow* — widening raises
-`PolicyViolation`. A runnable version is in [`examples/python_api.py`](examples/python_api.py).
+`PolicyViolation`. A runnable version is in [`examples/python_api.py`](https://github.com/farizrahman4u/temenos/blob/main/examples/python_api.py).
 
 ## 🧠 The one design decision
 
@@ -300,4 +300,4 @@ box underneath, and the wiring that makes the box the sole execution path.
 
 ## 📄 License
 
-[Apache-2.0](LICENSE) © temenos contributors
+[Apache-2.0](https://github.com/farizrahman4u/temenos/blob/main/LICENSE) © temenos contributors
