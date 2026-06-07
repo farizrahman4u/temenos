@@ -673,10 +673,17 @@ that mode.
   daemon-info file + flock → exactly one per-user daemon), `temenos serve`. Tests: id
   stability/distinctness, REST lifecycle, real spawned-daemon roundtrip — **90 green**.
   (Quotas deferred to Phase 4/hosted.)
-- **Phase 4 — context-aware CLI (project mode, D15/D16):** `.temenos/` discovery (walk
-  up), name resolution (project→global, shadow warning), `create`/`ls`/`exec`/`shell`/`rm`/
-  `audit`/`diff`; everything-in-`.temenos/<box>`; live-writable repo mount (`--ephemeral`
-  opt-in); `--scratch`/`--force-memory`/`--image`/`--net`/`--volume` flags; `temenos doctor`.
+- **Phase 4 — context-aware CLI (project mode, D15/D16). ✅ DONE.** `project.py`
+  (`find_project` walk-up stopping at `$HOME`/`/`; `ensure_project` creates `.temenos/` +
+  `.gitignore`; `resolve_box` project→global with `shadows_global` flag), CLI
+  `create`/`ls`/`exec`/`shell`/`rm`/`audit`/`diff` driving the daemon client, everything in
+  `.temenos/<box>` (config from `config.json`), **live-writable repo mount** at its real
+  path (write-bind of the project root + tmpfs mask over `.temenos`; `--ephemeral` flips it
+  read-only), `--scratch`/`--force-memory`/`--ephemeral-fs`/`--no-autosave`/`--image`/
+  `--net`/`--volume`/`--memory`/`--cpu`/`--global` flags. New daemon endpoints
+  `/v1/boxes/{id}/audit` and `/writes`. `shell` is a non-PTY REPL (client-side cwd tracking;
+  true interactivity lands with MCP in Phase 5). Tests: pure discovery/resolution + a
+  gVisor-gated `create→exec→ls→audit→rm` e2e through `main()` — **109 green**.
 - **Phase 5 — MCP + `temenos claude` + durability:** MCP at `/mcp/<id>` (per-box token) +
   the §8e Claude wiring (ban native tools); checkpoint-on-stop / restore-on-use for project
   boxes; the leak-test (§10) as the acceptance gate.

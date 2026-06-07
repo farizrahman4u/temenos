@@ -84,6 +84,12 @@ class DaemonClient:
         return self._json(self._c.post(f"/v1/boxes/{bid}/exec", json={
             "cmd": cmd, "cwd": cwd, "timeout": timeout, "stdin": stdin}))
 
+    def audit(self, bid: str) -> list[dict]:
+        return self._json(self._c.get(f"/v1/boxes/{bid}/audit"))  # type: ignore[return-value]
+
+    def writes(self, bid: str) -> list[str]:
+        return self._json(self._c.get(f"/v1/boxes/{bid}/writes")).get("writes", [])
+
 
 def connect() -> DaemonClient | None:
     """Return a client to a running daemon, or None if none is reachable."""

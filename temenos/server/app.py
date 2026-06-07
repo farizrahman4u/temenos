@@ -79,4 +79,12 @@ def create_app(manager: BoxManager | None = None, token: str | None = None) -> F
         return manager.get(bid).exec(body.cmd, cwd=body.cwd, timeout=body.timeout,
                                      stdin=body.stdin).to_dict()
 
+    @app.get("/v1/boxes/{bid}/audit", dependencies=[Depends(auth)])
+    def audit_box(bid: str) -> list[dict]:
+        return manager.get(bid).audit.to_dicts()
+
+    @app.get("/v1/boxes/{bid}/writes", dependencies=[Depends(auth)])
+    def writes_box(bid: str) -> dict:
+        return {"writes": manager.get(bid).writes()}
+
     return app
