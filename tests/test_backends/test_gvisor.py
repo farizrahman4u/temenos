@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from temenos import Box, Policy, TrustLevel
+from temenos import Box, DiskVolume, MemoryVolume, Mount, Policy, TrustLevel
 from temenos.backends.gvisor import GVisorBackend
 from temenos.exceptions import BackendError
 
@@ -53,8 +53,8 @@ def test_writes_manifest_lists_written_file(tmp_path):
         assert target in box.writes()
 
 
-def test_missing_policy_path_gives_clear_error():
-    box = Box("t-missing", Policy(write=["/work"]))   # /work doesn't exist on host
+def test_missing_read_path_gives_clear_error():
+    box = Box("t-missing", Policy(read=["/no/such/path/xyzzy"]))
     with pytest.raises(BackendError, match="does not exist on host"):
         box.start()
 
@@ -66,14 +66,38 @@ def test_two_boxes_are_isolated():
         assert b.exec(["cat", "/tmp/secret"]).exit_code != 0
 
 
-def test_writes_do_not_touch_host(tmp_path):
-    # the ephemeral-by-default guarantee: a writable host bind stays unchanged
+def test_disk_write_persists_to_host(tmp_path):
+    # write= is the Disk provider: durable, writes land on the host dir
     hostfile = tmp_path / "f.txt"
     hostfile.write_text("ORIGINAL")
-    with _box("t-ephemeral", write=[str(tmp_path)]) as box:
+    with _box("t-disk", write=[str(tmp_path)]) as box:
         box.write_file(str(hostfile), "BOX_WROTE")
-        assert box.read_file(str(hostfile)) == "BOX_WROTE"   # box sees its write
-    assert hostfile.read_text() == "ORIGINAL"                 # host is untouched
+        assert box.read_file(str(hostfile)) == "BOX_WROTE"
+    assert hostfile.read_text() == "BOX_WROTE"                # durable on disk
+
+
+def test_memory_volume_is_writable_and_offhost():
+    # a MemoryVolume is ephemeral RAM at the target; nothing exists on the host for it
+    pol = Policy(mounts=[Mount("/scratch", MemoryVolume(), mode="rw")])
+    with Box("t-mem", pol) as box:
+        r = box.exec(["sh", "-c", "echo hi > /scratch/x && cat /scratch/x"])
+        assert r.ok and r.stdout.strip() == "hi"
+
+
+def test_disk_volume_remapped_target_persists(tmp_path):
+    # explicit Disk mount at a remapped path; writes persist to the host dir
+    pol = Policy(mounts=[Mount("/data", DiskVolume(str(tmp_path)), mode="rw")])
+    with Box("t-diskvol", pol) as box:
+        box.write_file("/data/out.txt", "payload")
+    assert (tmp_path / "out.txt").read_text() == "payload"
+
+
+def test_root_writes_stay_ephemeral():
+    # root:memory — writing outside any volume is ephemeral and never hits the host
+    with _box("t-rootmem") as box:
+        assert box.exec(["sh", "-c", "echo x > /var_test_file 2>/dev/null; "
+                                     "mkdir -p /scratchdir && echo ok > /scratchdir/f "
+                                     "&& cat /scratchdir/f"]).stdout.strip() == "ok"
 
 
 def test_read_only_path_is_visible():

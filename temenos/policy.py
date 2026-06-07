@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 
 from .exceptions import PolicyViolation
+from .storage import Mount
 
 
 class TrustLevel(IntEnum):
@@ -51,9 +52,15 @@ _ALL_FIELDS = _SET_FIELDS + _INT_FIELDS + ("trust",)
 
 @dataclass(frozen=True)
 class Policy:
-    # Filesystem — HOST paths made visible inside the box.
-    read: tuple[str, ...] = ()          # read-only
-    write: tuple[str, ...] = ()         # CoW: writes go to the overlay, never the host
+    # Filesystem — HOST paths made visible inside the box, at the same path.
+    # These are sugar for DiskVolume mounts: `read` = read-only disk bind, `write` =
+    # durable read-write disk bind (writes persist to the host dir). For ephemeral
+    # scratch use a MemoryVolume mount (or /tmp); for remapped/remote storage use `mounts`.
+    read: tuple[str, ...] = ()
+    write: tuple[str, ...] = ()
+
+    # Explicit provider-backed volumes (memory / disk / fsspec / custom) at chosen paths.
+    mounts: tuple[Mount, ...] = ()
 
     # Network — default deny. Entries are "host" or "host:port". (v1: non-empty network
     # requires the post-v1 egress filter; an empty tuple = no network.)
@@ -74,6 +81,10 @@ class Policy:
             if isinstance(value, (str, bytes)):
                 raise TypeError(f"{f} must be a sequence of strings, not {type(value).__name__}")
             object.__setattr__(self, f, tuple(dict.fromkeys(value)))
+        object.__setattr__(self, "mounts", tuple(self.mounts))
+        for m in self.mounts:
+            if not isinstance(m, Mount):
+                raise TypeError(f"mounts must contain Mount instances, got {type(m).__name__}")
         object.__setattr__(self, "trust", _coerce_trust(self.trust))
         for f in _INT_FIELDS:
             v = getattr(self, f)
@@ -122,13 +133,16 @@ class Policy:
                         f"restrict() cannot raise trust: {nt.name} > {self.trust.name}"
                     )
                 merged[field_name] = nt
+        # mounts are inherited unchanged (v1: restrict narrows the simple capabilities;
+        # provider-backed volumes are not subset-narrowed — see plan).
+        merged["mounts"] = self.mounts
         return Policy(**merged)  # type: ignore[arg-type]
 
     # -- plain-data round trip (shared by REST/MCP/CLI/config) -----------------------
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> "Policy":
-        unknown = set(data) - set(_ALL_FIELDS)
+        unknown = set(data) - set(_ALL_FIELDS) - {"mounts"}
         if unknown:
             raise ValueError(f"unknown policy field(s): {sorted(unknown)}")
         kwargs: dict[str, object] = {}
@@ -140,6 +154,8 @@ class Policy:
                 kwargs[f] = int(data[f])  # type: ignore[call-overload]
         if "trust" in data:
             kwargs["trust"] = _coerce_trust(data["trust"])  # type: ignore[arg-type]
+        if "mounts" in data:
+            kwargs["mounts"] = tuple(Mount.from_dict(m) for m in data["mounts"])  # type: ignore[union-attr]
         return cls(**kwargs)  # type: ignore[arg-type]
 
     def to_dict(self) -> dict[str, object]:
@@ -147,6 +163,7 @@ class Policy:
             "read": list(self.read),
             "write": list(self.write),
             "network": list(self.network),
+            "mounts": [m.to_dict() for m in self.mounts],
             "max_memory_mb": self.max_memory_mb,
             "max_cpu_seconds": self.max_cpu_seconds,
             "max_processes": self.max_processes,

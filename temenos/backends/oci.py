@@ -53,13 +53,16 @@ def _mounts(policy: Policy) -> list[dict]:
         if os.path.isdir(src) and not os.path.islink(src):
             mounts.append({"destination": src, "source": src, "type": "bind",
                            "options": ["rbind", "ro"]})
-    # policy mounts: read paths read-only, write paths read-write (CoW via --overlay2).
+    # read/write sugar: same-path disk binds (read = ro, write = durable rw to host).
     for path in policy.read:
         mounts.append({"destination": path, "source": path, "type": "bind",
                        "options": ["rbind", "ro"]})
     for path in policy.write:
         mounts.append({"destination": path, "source": path, "type": "bind",
                        "options": ["rbind", "rw"]})
+    # explicit provider-backed volumes (memory / disk / fsspec / custom).
+    for m in policy.mounts:
+        mounts.append(m.oci_mount())
     return mounts
 
 
@@ -91,7 +94,9 @@ def make_config(policy: Policy, init_cmd: list[str], env: dict[str, str] | None)
                              ("bounding", "effective", "inheritable", "permitted", "ambient")},
             "rlimits": _rlimits(policy),
         },
-        "root": {"path": "rootfs", "readonly": True},   # overlay2 provides writability
+        # writable root so tooling (pip/npm/builds) works; --overlay2=root:memory keeps
+        # those writes ephemeral in RAM and off the host bundle (verified).
+        "root": {"path": "rootfs", "readonly": False},
         "hostname": "temenos",
         "mounts": _mounts(policy),
         "linux": {

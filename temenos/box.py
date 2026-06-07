@@ -46,6 +46,13 @@ class Box:
                               {"backend": self._backend.name}, box=self.name)
         return self
 
+    def commit(self) -> None:
+        """Persist provider-backed volumes (e.g. fsspec upload). Disk/memory are no-ops."""
+        self._require_open()
+        commit = getattr(self._backend, "commit", None)
+        if callable(commit):
+            commit()
+
     def close(self) -> None:
         if self._opened:
             self._backend.close()

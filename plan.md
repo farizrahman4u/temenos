@@ -108,7 +108,8 @@ temenos/                         # (v1) built in v1 · (post) specified, deferre
 │   ├── box.py               # (v1) Box: persistent sandbox handle (exec/read/write/writes)
 │   ├── manager.py           # (v1) BoxManager: multi-tenant registry, CRUD, quotas, TTL
 │   ├── result.py            # (v1) ExecResult, AuditEntry, AuditLog (pure)
-│   ├── exceptions.py        # (v1) PolicyViolation, BoxNotFound, QuotaExceeded, BackendError
+│   ├── storage.py           # (v1) StorageProvider + MemoryVolume/DiskVolume + Mount (D12)
+│   ├── exceptions.py        # (v1) PolicyViolation, BoxNotFound, QuotaExceeded, Backend/StorageError
 │   │
 │   ├── backends/
 │   │   ├── base.py          # (v1) Backend ABC: open/exec/close
@@ -162,7 +163,8 @@ Phase 0 spike.
 | D4 | Surfaces | **Core lib → FastAPI daemon (REST + MCP) + thin CLI.** One core, multiple adapters. | §7 layering. |
 | D5 | seccomp | **gVisor's built-in interception.** Hand-rolled cBPF is post-v1 (native only). | gVisor's filtering is stronger and already written. |
 | D6 | Resource limits | **Per-box `systemd-run --user --scope`** with `MemoryMax`/`MemorySwapMax=0`/`CPUQuota`/`TasksMax` from `Policy` (spike-verified: enforces, unprivileged, works from any cgroup). Direct delegated child cgroup is an optimization when the daemon runs inside `user@.service`. Fallback if no systemd user-delegation: warn + unenforced. | gVisor has no internal cap; cgroups are the only lever, and the user manager makes them unprivileged-per-box. |
-| D7 | CoW writes | gVisor **`--overlay2`**; inspect the upper layer for the write-set. | Native overlayfs dance avoided in v1. |
+| D7 | Box filesystem | **Writable root, ephemeral in RAM** (`--overlay2=root:memory`): tooling (pip/npm/builds) works, writes stay off the host (verified). Durable/remote storage is explicit, via **storage providers** (D12). | Separates "box scribbling in /usr" (ephemeral) from "the workspace" (explicit, managed). |
+| D12 | Storage providers | **Pluggable `StorageProvider`** mounted at box paths. v1: **MemoryVolume** (tmpfs, ephemeral) + **DiskVolume** (host dir, durable, contained: realpath + optional `allowed_root`, and gVisor's mount-ns stops in-box `..`). Post-v1: **FsspecVolume** (s3/azure/… via fsspec; sync-on-commit; remote I/O runs on the host so the box stays network-less). `read`/`write` are sugar for ro/rw DiskVolumes. | Everything resolves to one box mount — providers differ in backing + commit/cleanup. Pluggable in Python = the extension point. |
 | D8 | Sandbox env | **Minimal env** (`PATH`,`HOME=/tmp`,`LANG`); host env **not** inherited; caller adds via `env=`. | Host env may hold secrets (`ANTHROPIC_API_KEY`). |
 | D9 | Backend select | v1 gVisor only. `TrustLevel` gates **policy strictness** (net/limits/mounts), not backend. `HOST` = explicit no-sandbox escape hatch. | Multi-backend selection returns when native lands. |
 | D10 | Audit fidelity | exec + network-connection + spawn + write-set. **No per-syscall tracing** in v1. | Honest scope. |
@@ -186,6 +188,26 @@ child; surviving a daemon restart (gVisor `checkpoint`/`restore`) is post-v1.
 - Per-tenant **quotas** (max boxes, aggregate mem/disk — reject, don't silently queue),
   idle-TTL eviction, dead-child detection.
 - **Agents never get `create`/`delete`** — box lifecycle is operator/CLI-controlled.
+
+### Runtime & dependencies (verified)
+
+Boxes don't install runtimes per-box and don't run host-side (unsandboxed) binaries.
+Instead the box's rootfs **binds the host `/usr` read-only**, so the host's `python3`,
+`node`, `gcc`, and all system-installed packages are available — executed **inside
+gVisor**, not on the host. Verified: host `python3`/`node`/`pip` run in the box, `/usr`
+writes are denied, box can't escape.
+
+**v1 constraints on *adding* deps:** `/usr` is read-only (no system `pip`/`apt`), and v1
+has **no network** (no PyPI/npm fetch — verified `pip install` → "No matching
+distribution"). `venv` builds the env but can't bootstrap pip offline (Debian strips
+ensurepip wheels); `--without-pip` works. So a v1 box uses **stdlib + host
+system-installed packages (ro) + whatever is mounted in**.
+- **Custom deps in v1:** pre-build a venv / site-packages / node_modules / wheelhouse on
+  the host (or a DiskVolume), mount it (`Mount("/deps", DiskVolume(...), "ro")`), and set
+  `PYTHONPATH`/`NODE_PATH`/`PATH`. No network needed.
+- **Post-v1:** filtered network → live `pip`/`npm` into a writable volume; **box images
+  (`--image`)** → a prepared base rootfs instead of host `/usr`, for chosen runtime
+  *versions* + baked deps (today every box inherits the host's system Python 3.12).
 
 ---
 
@@ -409,15 +431,17 @@ needs `/dev/kvm`) → **`systrap`** (gVisor's modern default, no KVM needed) →
 hits `StartRoot EOF`); a native Linux host with `/dev/kvm` gets kvm, a typical cloud VM
 gets systrap.
 
-- **`open(policy)`** — build a bundle: `rootfs/` with usrmerge symlinks
-  (`bin`→`usr/bin`, …) + read-only bind of host `/usr`,`/etc`; tmpfs `/tmp`,`/dev`;
-  `proc`. Write `config.json` from `Policy`: namespaces incl. network, `--overlay2`
-  upper for `policy.write` CoW (D7), `linux.resources` (D6, best-effort), minimal env
-  (D8), empty capability sets. Start a **held** child, wrapping `runsc` in a per-box
-  systemd scope so memory/CPU/pids are actually enforced (D6):
+- **`open(policy)`** — run each storage provider's `prepare()` (mkdir/download); build a
+  bundle: writable `rootfs/` with usrmerge symlinks + read-only bind of host `/usr`,`/etc`;
+  tmpfs `/tmp`,`/dev`; `proc`; plus the provider mounts (D12) and `read`/`write` disk
+  binds. Write `config.json` from `Policy`: namespaces incl. network, minimal env (D8),
+  empty caps, RLIMIT_NPROC/CPU. Global flag **`--overlay2=root:memory`** (writable root,
+  ephemeral in RAM, host-safe — verified). Start a **held** child wrapping `runsc` in a
+  per-box systemd scope for enforced memory (D6):
   `systemd-run --user --scope -q -p MemoryMax=<mem> -p MemorySwapMax=0
-  -p CPUQuota=<n>% -p TasksMax=<procs> -- runsc <global> run -bundle <dir> <cid>`
-  (init `sleep infinity`); poll `runsc state <cid>` until `"running"`. (Rootless can't
+  -- runsc <global> run -bundle <dir> <cid>` (NB: no `TasksMax` — it would starve the
+  sentry's host threads; guest procs are bounded via RLIMIT_NPROC). Init `sleep infinity`;
+  poll `runsc state <cid>` until `"running"`. (Rootless can't
   `create`+`start` — `run` only. If no systemd user-delegation: drop the wrapper, log a
   warning that limits are unenforced.)
 - **`exec(cmd)`** — `runsc <global> exec <cid> -- <cmd>`; collect stdout/stderr/exit.
@@ -514,13 +538,16 @@ that mode.
   `Policy` (restrict/from_dict/to_dict/allows_*), `TrustLevel`, `ExecResult`,
   `AuditEntry`/`AuditLog`, exception hierarchy. 37 tests green (`tests/test_policy.py`,
   `tests/test_result.py`). Package scaffold (`pyproject.toml`, `temenos/`) in place.
-- **Phase 2 — gVisor backend + `Box`. ✅ DONE.** `backends/base.py` (ABC),
-  `backends/oci.py` (bundle from Policy), `backends/gvisor.py` (platform auto-detect,
-  held-run + exec, `--overlay2=all:memory` so writes never touch the host, per-box
-  systemd memory scope), `box.py` (`exec`/`read_file`/`write_file`/`list_dir`/`writes`,
-  audit, context manager). 11 integration tests green (`tests/test_backends/`): write-then-
-  run `42`, two-box isolation, host-untouched ephemerality, clear errors for v1 network /
-  missing-path. Bind sources must be existing host paths; `/tmp` is the scratch tmpfs.
+- **Phase 2 — gVisor backend + `Box` + storage providers. ✅ DONE.** `backends/base.py`
+  (ABC), `backends/oci.py` (bundle from Policy), `backends/gvisor.py` (platform
+  auto-detect, held-run + exec, `--overlay2=root:memory` writable-but-ephemeral root,
+  per-box systemd memory scope, provider prepare/commit/cleanup), `storage.py`
+  (`StorageProvider` + `MemoryVolume`/`DiskVolume` + `Mount`, D12), `box.py`
+  (`exec`/`read_file`/`write_file`/`list_dir`/`writes`/`commit`, audit, context manager).
+  **63 tests green** total: write-then-run `42`, two-box isolation, disk-durable vs
+  memory-ephemeral, root-ephemeral, disk containment (`allowed_root`), provider
+  round-trip, clear errors for v1 network / missing read path. `read`/`write` paths are
+  existing host dirs (write auto-created); `/tmp` is the scratch tmpfs.
 - **Phase 3 — CLI (local, no auth):** `create`/`ls`/`exec`/`shell`/`rm`/`audit`/`diff`
   against an in-process `BoxManager`; `temenos doctor`.
 - **Phase 4 — FastAPI daemon + `BoxManager`:** REST endpoints + token auth +
@@ -544,6 +571,31 @@ that mode.
 - **T3 jail launcher (`harness/jail.py`):** `temenos jail -- <harness cmd>` /
   `mgr.launch_harness(...)` — run a whole harness inside a box (pairs with the network
   filter so its model-API egress is contained). `temenos codex --box …`.
+- **FsspecVolume storage provider (D12):** s3/azure/gcs/… via fsspec. v1-after: **sync**
+  model — `prepare()` materializes the remote prefix to a local DiskVolume, `commit()`
+  uploads the diff; FUSE/live mode later. Remote I/O runs on the host (box stays
+  network-less); prefix-scoped. Behind a `temenos[storage]` extra.
+
+### Symlink containment for host-side volume access (spike-verified analysis)
+
+Spike result (`scripts/`-style probe): **the in-box layer is already safe** —
+- a box symlink to a host path *outside* its mounts (`/work/x → /tmp/secret`) reads as
+  *No such file or directory*: gVisor resolves symlinks **guest-side**, so absolute /
+  `../`-traversing targets resolve in the box's VFS, not the host's. The box cannot
+  escape its mount set via symlinks.
+- root-only host files (`/etc/shadow`) return *Permission denied* even though `/etc` is
+  bound, because the gofer runs as the **unprivileged host user**.
+
+**The real risk is host-side:** a box can plant `/<vol>/evil → /home/user/.ssh/id_rsa`
+in a DiskVolume, and any temenos code that walks the volume **on the host** would follow
+it. So:
+- `box.writes()` is safe today — it runs `find` *inside* the box (guest-side).
+- When building **`export` / `commit` / fsspec-sync** (the host-side readers/writers of a
+  volume), they MUST NOT follow symlinks out of the volume root: `os.walk(followlinks=
+  False)` + realpath-containment per entry, or `openat2(RESOLVE_BENEATH |
+  RESOLVE_NO_SYMLINKS)`; copy symlinks *as* symlinks, never write *through* one.
+- Leak-test: plant `/<vol>/evil → ~/.ssh/id_rsa`, assert `export` doesn't dereference it.
+- `allowed_root` covers config-time escape; this covers runtime-created symlinks.
 - **Native namespaces backend (`backends/native.py`, `rootfs/`):** no-`runsc` fallback at
   weaker isolation — ctypes `unshare`/`mount`/`pivot_root`/`setns`, a fork-after-unshare
   **keeper** as PID 1, hand-assembled **seccomp cBPF** (old D5), cgroups v2, overlayfs.

@@ -27,3 +27,9 @@ class QuotaExceeded(TemenosError):
 class BackendError(TemenosError):
     """The sandbox backend could not satisfy a request — e.g. no usable gVisor platform,
     the box failed to start, or an exec could not be dispatched."""
+
+
+class StorageError(TemenosError):
+    """A storage provider could not prepare/commit/clean up a volume — e.g. a disk path
+    that escapes its allowed root, or a missing backing directory."""
+

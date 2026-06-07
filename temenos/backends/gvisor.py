@@ -84,8 +84,10 @@ class GVisorBackend(Backend):
     # -- flag construction ------------------------------------------------------------
 
     def _run_globals(self, platform: str) -> list[str]:
+        # root:memory => root/system writes are ephemeral RAM (host untouched); volume
+        # mounts (disk binds, tmpfs) keep their own semantics (disk = durable).
         return [self._runsc, f"--root={self._state}", "--rootless", "--network=none",
-                "--ignore-cgroups", "--overlay2=all:memory", f"--platform={platform}"]
+                "--ignore-cgroups", "--overlay2=root:memory", f"--platform={platform}"]
 
     def _ctl_globals(self) -> list[str]:
         # exec/state/kill/delete join the running sandbox; no --overlay2 needed.
@@ -119,14 +121,17 @@ class GVisorBackend(Backend):
                 "network policy requires post-v1 egress filtering; v1 supports only an "
                 "empty network (no egress). Got: " + ", ".join(policy.network)
             )
-        # bind sources must exist on the host (writes go to the overlay, but the mount
-        # point must be real). Box-internal scratch should use the always-present /tmp.
-        for path in (*policy.read, *policy.write):
+        # read paths must already exist (host data we expose). write paths are durable
+        # disk binds — created if missing (the box's output dir). Box-internal scratch
+        # should use the always-present /tmp or a MemoryVolume.
+        for path in policy.read:
             if not os.path.exists(path):
                 raise BackendError(
-                    f"policy path does not exist on host: {path!r} "
-                    "(read/write paths must be existing host paths; use /tmp for scratch)"
+                    f"read path does not exist on host: {path!r} "
+                    "(read paths must be existing host paths; use /tmp for scratch)"
                 )
+        for path in policy.write:
+            os.makedirs(path, exist_ok=True)
         platform = self.detect_platform(self._runsc)
         if platform is None:
             raise BackendError("no usable gVisor platform (need runsc + kvm/systrap/ptrace)")
@@ -136,6 +141,9 @@ class GVisorBackend(Backend):
         self._cid = name or f"temenos-{uuid.uuid4().hex[:12]}"
         self._state = tempfile.mkdtemp(prefix="temenos-state-")
         self._bundle = tempfile.mkdtemp(prefix="temenos-bundle-")
+        # let each storage provider set up its backing (mkdir, download, …) before start
+        for m in policy.mounts:
+            m.provider.prepare(self._cid)
         oci.build_bundle(policy, self._bundle, env=env)
 
         run_cmd = (self._scope_prefix(policy)
@@ -216,11 +224,23 @@ class GVisorBackend(Backend):
             duration_ms=int((time.monotonic() - started) * 1000),
         )
 
+    def commit(self) -> None:
+        """Persist provider-backed volumes (e.g. fsspec upload). Disk/memory are no-ops."""
+        if self._policy and self._cid:
+            for m in self._policy.mounts:
+                m.provider.commit(self._cid)
+
     def close(self) -> None:
         if self._cid and self._state:
             ctl = self._ctl_globals()
             subprocess.run(ctl + ["kill", self._cid, "KILL"], capture_output=True)
             subprocess.run(ctl + ["delete", "--force", self._cid], capture_output=True)
+        if self._policy and self._cid:
+            for m in self._policy.mounts:
+                try:
+                    m.provider.cleanup(self._cid)
+                except Exception:  # noqa: BLE001 — cleanup must not mask teardown
+                    log.warning("storage cleanup failed for %s", m.target, exc_info=True)
         if self._held is not None:
             try:
                 self._held.wait(timeout=10)
@@ -230,4 +250,4 @@ class GVisorBackend(Backend):
         for d in (self._bundle, self._state):
             if d:
                 shutil.rmtree(d, ignore_errors=True)
-        self._bundle = self._state = self._cid = None
+        self._bundle = self._state = self._cid = self._policy = None
