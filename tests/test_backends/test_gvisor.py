@@ -120,6 +120,7 @@ def test_default_box_is_checkpointable(tmp_path):
         dest = str(tmp_path / "ckpt")
         box.checkpoint(dest)
         assert os.path.getsize(os.path.join(dest, "multitar.img")) > 0
+        assert box.running and box.exec(["true"]).ok    # leave_running default — box survives
 
 
 def test_memory_scratch_box_cannot_checkpoint(tmp_path):

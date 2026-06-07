@@ -165,6 +165,9 @@ Phase 0 spike.
 | D5 | seccomp | **gVisor's built-in interception.** Hand-rolled cBPF is post-v1 (native only). | gVisor's filtering is stronger and already written. |
 | D6 | Resource limits | **Per-box `systemd-run --user --scope`** with `MemoryMax`/`MemorySwapMax=0`/`CPUQuota`/`TasksMax` from `Policy` (spike-verified: enforces, unprivileged, works from any cgroup). Direct delegated child cgroup is an optimization when the daemon runs inside `user@.service`. Fallback if no systemd user-delegation: warn + unenforced. | gVisor has no internal cap; cgroups are the only lever, and the user manager makes them unprivileged-per-box. |
 | D7 | Box filesystem | **Writable root, ephemeral, disk-backed by default** (`Policy.scratch="disk"` → `--overlay2=root:dir=<per-box dir>`): tooling (pip/npm/builds) works, writes stay off the host, AND the box is **checkpointable** (D14). `scratch="memory"` (`root:memory`) is a fast RAM-backed opt-in that is **RAM-bound and NOT checkpointable** — backend warns; `checkpoint()` refuses it. Durable/remote storage is explicit via providers (D12). | Default must be checkpointable; memory is an explicit, warned escape hatch. |
+| D17 | Background checkpointing ✅ | `Policy.checkpoint`: **`auto`** (loop + on-close, default) / **`on-close`** (`--no-autosave`) / **`off`** (`--ephemeral-fs`). Loop checkpoints **dirty** boxes on **idle-debounce (~3s)** or **staleness cap (~60s)**, capped per tick — not naive fixed-interval. **No registry — the box dir's `checkpoint/` is the resume point** (restore-on-next-`create`). `fscheckpoint --leave-running` (~30 ms); atomic write, keep last-good. | Snapshots at tool-call quiescence; box-dir is self-describing; cheap. §8f. |
+| D15 | Project-dir CLI | git-style `.temenos/` discovery (walk up from CWD; auto-create + a `default` box). A bare box name resolves **project-first, then global**; a project box **shadows** a same-named global one (CLI warns). One auto-spawned **per-user daemon on one port**; all clients attach; MCP routes by path-hash **box-id**. | Zero-config local UX; disambiguation without typing data paths. §8f. |
+| D16 | Box state & repo mount | **Everything lives in `.temenos/<box>/`** (config/overlay/checkpoint/exports — portable, gitignored). The repo mounts **live-writable** by default so Claude edits real files (sandbox contains *execution*, not edits); `--ephemeral` opt-in flips to overlay+review. | Matches "use claude on my repo"; per-project, cleanable boxes. §8f. |
 | D14 | Scratch medium / checkpoint | **`Policy.scratch="disk"` default** (`root:dir`, disk-backed): not RAM-bound + **checkpointable** (`Box.checkpoint` → `fscheckpoint`, verified). `scratch="memory"` (`root:memory`) is a warned opt-in: RAM-bound + **cannot checkpoint** (`checkpoint()` refuses it). | `root:memory` blocks fscheckpoint, so it must not be the silent default. |
 | D12 | Storage providers | **Pluggable `StorageProvider`** mounted at box paths. v1: **MemoryVolume** (tmpfs, ephemeral) + **DiskVolume** (host dir, durable, contained: realpath + optional `allowed_root`, and gVisor's mount-ns stops in-box `..`). Post-v1: **FsspecVolume** (s3/azure/… via fsspec; sync-on-commit; remote I/O runs on the host so the box stays network-less). `read`/`write` are sugar for ro/rw DiskVolumes. | Everything resolves to one box mount — providers differ in backing + commit/cleanup. Pluggable in Python = the extension point. |
 | D8 | Sandbox env | **Minimal env** (`PATH`,`HOME=/tmp`,`LANG`); host env **not** inherited; caller adds via `env=`. | Host env may hold secrets (`ANTHROPIC_API_KEY`). |
@@ -459,6 +462,64 @@ path is the box's MCP tools, every host-touching native tool banned:
    operates through MCP. (Reading the host project directly would be the spillover we
    prevent.)
 
+### 8f. Project mode, box resolution & the single daemon (D15/D16)
+
+**Box identity = `hash(realpath(<box data dir>))`.** Project box dir =
+`<repo>/.temenos/<name>`; global box dir = `$TEMENOS_DATA/boxes/<name>`. One scheme →
+two repos' `default` boxes get distinct ids; the daemon registry and the MCP route
+(`/mcp/<id>`) key on it. **This is the disambiguation** — no user-typed data paths.
+
+**Everything in `.temenos/<box>/`** (D16): `config.toml` (the Policy), the overlay upper
+(the box's writes), checkpoints, write-set exports, logs — project-local, portable,
+`rm -rf`-able. The CLI writes a `.temenos/.gitignore`. *Verified*: runsc `--root` +
+overlay under a deep `.temenos` path work (abstract sockets, no 108-char socket limit at
+realistic depth); the daemon falls back to a short runtime state dir only for a
+pathologically long path.
+
+**Location separation — `.temenos` is ONLY the project marker.** Global/daemon state must
+*not* live in `~/.temenos`, or `temenos` run in `$HOME` would mistake it for a project.
+So: daemon runtime (token/lock/pid) → `$XDG_RUNTIME_DIR/temenos/` (0700, transient);
+global boxes + images → `$XDG_DATA_HOME/temenos/` (`~/.local/share/temenos`). Neither is
+named `.temenos` nor sits on a repo's walk-up path. **Walk-up safeguard:** discovery stops
+at `$HOME` and at `/`; auto-creating `.temenos/` in `$HOME` warns ("creating a project box
+in your home dir — did you mean a global/named box?").
+
+**Name resolution (git-style, no data-path typing).** A bare name resolves to the
+project `.temenos/<name>` (walking up from CWD) if it exists, **else** the global
+`$XDG_DATA_HOME/temenos/boxes/<name>`. If both exist the **project box wins and the CLI
+warns** that it shadows a global box of the same name.
+
+**One daemon, one port, auto-spawn.** A single per-user daemon binds `127.0.0.1:PORT`
+serving REST (control) + MCP (`/mcp/<id>`, per-box token). Every CLI call
+**connects-or-spawns** (flock + readiness wait → exactly one daemon). All temenos
+processes across all repos attach to it.
+
+**`temenos claude` (the basic flow):** discover `.temenos/` (walk up; create in CWD +
+`.gitignore` if none) → box = `--box` or `default`, dir `.temenos/<box>`, id = hash →
+ensure daemon → ensure box running (create from `config.toml`, mount the repo) → write a
+temp MCP config (`http://127.0.0.1:PORT/mcp/<id>` + token), ban native tools, exec
+`claude <args>`.
+
+**Repo mount = live-writable by default (D16/decision 1).** The repo (the dir holding
+`.temenos`) mounts read-write so Claude's edits land in your real files — the box
+contains *execution* (bash/python can't escape, network gated, limited, audited), not the
+trusted agent's edits. `--ephemeral` flips it to overlay-with-review (`temenos diff` +
+commit). `.temenos/` itself is excluded from the mount so the box can't scribble its own
+state.
+
+**Durability (D17). ✅ BUILT.** **The box dir is its own registry** — no separate state
+file: a box checkpoints to `<box dir>/checkpoint` and, on next `create`, **restores from
+it**, so resuming is just re-running `temenos claude` in the repo (the daemon doesn't track
+desired-running state across restarts). Modes via `Policy.checkpoint`: **`auto`** (default —
+background loop + commit-on-close), **`on-close`** (`--no-autosave`: commit only on close,
+loop off), **`off`** (`--ephemeral-fs`: never persist). The loop tracks a per-box **dirty**
+flag (set on each `exec`) and checkpoints a dirty box on **idle-debounce** (~3 s quiet →
+stable state, coalesces bursts) **or a staleness cap** (~60 s → bounds work-at-risk),
+**capped per tick** (no I/O herd). `fscheckpoint --leave-running` (~30 ms). Atomic write
+(temp dir → rename, keep last-good). Snapshots land at agent tool-call quiescence.
+(`scratch="memory"` can't checkpoint → treated as off.) Verified: auto-resume across a
+fresh manager, `--ephemeral-fs` non-persist, loop fires on idle.
+
 ---
 
 ## 9. gVisor backend contract (verified)
@@ -603,12 +664,22 @@ that mode.
   unblock for `apt`/system-`pip`. **72 tests green.** (Persistence: gVisor `fscheckpoint`
   + `-fs-restore-image-path` verified with a disk-backed overlay — checkpointable boxes
   opt into `root:self`/`root:dir`.)
-- **Phase 3 — CLI (local, no auth):** `create`/`ls`/`exec`/`shell`/`rm`/`audit`/`diff`
-  against an in-process `BoxManager`; `temenos doctor`.
-- **Phase 4 — FastAPI daemon + `BoxManager`:** REST endpoints + token auth +
-  multi-tenancy + quotas; CLI becomes a REST client (auto-starts local daemon).
-- **Phase 5 — MCP sub-app + `temenos claude`:** per-box MCP toolset + stdio bridge; the
-  Claude wiring (§8e); the leak-test (§10) as the acceptance gate.
+  *(`image build/ls/rm` CLI already exists from Phase 2.)*
+- **Phase 3 — daemon + `BoxManager`. ✅ DONE.** `manager.py` (`BoxManager`: path-hash
+  `box_id`, create/get/list/delete, idempotent "ensure", persists `config.json`, dead-box
+  recreate, `shutdown`), `backends/gvisor.py` `work_dir=` (state/bundle/overlay under the
+  box data dir — everything-in-.temenos), `server/app.py` (FastAPI: `/healthz`,
+  `/v1/boxes` CRUD + `/exec`, Bearer-token auth), `server/client.py` (`connect_or_spawn`:
+  daemon-info file + flock → exactly one per-user daemon), `temenos serve`. Tests: id
+  stability/distinctness, REST lifecycle, real spawned-daemon roundtrip — **90 green**.
+  (Quotas deferred to Phase 4/hosted.)
+- **Phase 4 — context-aware CLI (project mode, D15/D16):** `.temenos/` discovery (walk
+  up), name resolution (project→global, shadow warning), `create`/`ls`/`exec`/`shell`/`rm`/
+  `audit`/`diff`; everything-in-`.temenos/<box>`; live-writable repo mount (`--ephemeral`
+  opt-in); `--scratch`/`--force-memory`/`--image`/`--net`/`--volume` flags; `temenos doctor`.
+- **Phase 5 — MCP + `temenos claude` + durability:** MCP at `/mcp/<id>` (per-box token) +
+  the §8e Claude wiring (ban native tools); checkpoint-on-stop / restore-on-use for project
+  boxes; the leak-test (§10) as the acceptance gate.
 - **Phase 6 — polish & release:** README (threat model, multi-tenancy, ptrace/WSL notes,
   the systemd-delegation requirement for limits (D6), and the one honest limit: no v1
   network filtering), examples (sample Claude config), PyPI.

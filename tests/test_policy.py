@@ -153,6 +153,14 @@ def test_network_round_trips_as_bool():
     assert Policy.from_dict({"network": "host"}).network is True
 
 
+def test_checkpoint_mode_defaults_and_validates():
+    assert Policy().checkpoint == "auto"
+    assert Policy(checkpoint="off").checkpoint == "off"
+    with pytest.raises(ValueError):
+        Policy(checkpoint="sometimes")
+    assert Policy.from_dict(Policy(checkpoint="on-close").to_dict()).checkpoint == "on-close"
+
+
 def test_scratch_defaults_to_disk_and_validates():
     assert Policy().scratch == "disk"                 # checkpointable by default
     assert Policy(scratch="memory").scratch == "memory"

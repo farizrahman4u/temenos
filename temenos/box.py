@@ -10,6 +10,8 @@ running these in a threadpool (plan §7/§8).
 """
 from __future__ import annotations
 
+import time
+
 from .backends.base import Backend
 from .policy import Policy
 from .result import AuditLog, ExecResult, PolicyDecision
@@ -33,6 +35,10 @@ class Box:
         self._env = env
         self._restore_from = restore_from
         self._opened = False
+        # dirty-tracking for the checkpoint heuristic (D17): set on exec, cleared on checkpoint
+        self._dirty = False
+        self._dirty_since = 0.0
+        self._last_activity = 0.0
         if backend is None:
             from .backends.gvisor import GVisorBackend
             backend = GVisorBackend()
@@ -57,21 +63,46 @@ class Box:
         if callable(commit):
             commit()
 
-    def checkpoint(self, dest: str) -> None:
-        """Save the box's filesystem to `dest`. Needs scratch='disk' (the default);
-        a scratch='memory' box cannot be checkpointed. Restore by creating a new box with
-        `Box(name, policy, restore_from=dest)`."""
+    def checkpoint(self, dest: str, *, leave_running: bool = True) -> None:
+        """Save the box's filesystem to `dest`, keeping the box running by default. Needs
+        scratch='disk' (the default); a scratch='memory' box cannot be checkpointed.
+        Restore by creating a new box with `Box(name, policy, restore_from=dest)`."""
         self._require_open()
         fscheckpoint = getattr(self._backend, "fscheckpoint", None)
         if not callable(fscheckpoint):
             raise RuntimeError("backend does not support checkpointing")
-        fscheckpoint(dest)
-        self.audit.record("checkpoint", PolicyDecision.ALLOW, {"dest": dest}, box=self.name)
+        fscheckpoint(dest, leave_running=leave_running)
+        self._dirty = False                     # clean since this checkpoint
+        self.audit.record("checkpoint", PolicyDecision.ALLOW,
+                          {"dest": dest, "leave_running": leave_running}, box=self.name)
 
     def close(self) -> None:
         if self._opened:
             self._backend.close()
             self._opened = False
+
+    @property
+    def dirty(self) -> bool:
+        """True if the box has exec'd (changed) since its last checkpoint."""
+        return self._dirty
+
+    def should_autocheckpoint(self, *, idle_debounce: float, max_staleness: float,
+                              now: float | None = None) -> bool:
+        """Checkpoint heuristic (D17): only if dirty, and either quiet for `idle_debounce`
+        (captures a stable resting state, coalesces bursts) or continuously dirty for
+        `max_staleness` (bounds work-at-risk on a busy box)."""
+        if not self._dirty:
+            return False
+        now = time.monotonic() if now is None else now
+        return (now - self._last_activity) >= idle_debounce \
+            or (now - self._dirty_since) >= max_staleness
+
+    @property
+    def running(self) -> bool:
+        if not self._opened:
+            return False
+        alive = getattr(self._backend, "alive", None)
+        return alive() if callable(alive) else True
 
     def __enter__(self) -> "Box":
         return self.start()
@@ -93,6 +124,11 @@ class Box:
         self._require_open()
         data = stdin.encode() if isinstance(stdin, str) else stdin
         result = self._backend.exec(cmd, cwd=cwd, env=env, stdin=data, timeout=timeout)
+        now = time.monotonic()
+        if not self._dirty:
+            self._dirty_since = now
+        self._dirty = True
+        self._last_activity = now
         self.audit.record(
             "exec", PolicyDecision.ALLOW,
             {"cmd": cmd, "exit_code": result.exit_code, "duration_ms": result.duration_ms},

@@ -93,6 +93,12 @@ class Policy:
     # checkpointed**; opt-in, backend warns).
     scratch: str = "disk"
 
+    # Filesystem persistence (D17): "auto" (background checkpoint loop + on close, the
+    # default), "on-close" (commit only when the box closes — loop off), "off"
+    # (--ephemeral-fs: never checkpoint, throwaway fs). The box dir's checkpoint is also
+    # what a box restores from on next use. (memory scratch can't checkpoint → treated as off.)
+    checkpoint: str = "auto"
+
     # Resource limits (enforced per-box via the systemd scope; see plan §9/D6).
     max_memory_mb: int = 256
     max_cpu_seconds: int = 30
@@ -117,6 +123,8 @@ class Policy:
             raise TypeError(f"image must be a str name or None, got {type(self.image).__name__}")
         if self.scratch not in ("disk", "memory"):
             raise ValueError(f"scratch must be 'disk' or 'memory', got {self.scratch!r}")
+        if self.checkpoint not in ("auto", "on-close", "off"):
+            raise ValueError(f"checkpoint must be 'auto'|'on-close'|'off', got {self.checkpoint!r}")
         object.__setattr__(self, "trust", _coerce_trust(self.trust))
         for f in _INT_FIELDS:
             v = getattr(self, f)
@@ -175,13 +183,14 @@ class Policy:
         merged["mounts"] = self.mounts
         merged["image"] = self.image
         merged["scratch"] = self.scratch
+        merged["checkpoint"] = self.checkpoint
         return Policy(**merged)  # type: ignore[arg-type]
 
     # -- plain-data round trip (shared by REST/MCP/CLI/config) -----------------------
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> "Policy":
-        unknown = set(data) - set(_ALL_FIELDS) - {"mounts", "image", "scratch"}
+        unknown = set(data) - set(_ALL_FIELDS) - {"mounts", "image", "scratch", "checkpoint"}
         if unknown:
             raise ValueError(f"unknown policy field(s): {sorted(unknown)}")
         kwargs: dict[str, object] = {}
@@ -201,6 +210,8 @@ class Policy:
             kwargs["image"] = data["image"]
         if "scratch" in data:
             kwargs["scratch"] = data["scratch"]
+        if "checkpoint" in data:
+            kwargs["checkpoint"] = data["checkpoint"]
         return cls(**kwargs)  # type: ignore[arg-type]
 
     def to_dict(self) -> dict[str, object]:
@@ -211,6 +222,7 @@ class Policy:
             "mounts": [m.to_dict() for m in self.mounts],
             "image": self.image,
             "scratch": self.scratch,
+            "checkpoint": self.checkpoint,
             "max_memory_mb": self.max_memory_mb,
             "max_cpu_seconds": self.max_cpu_seconds,
             "max_processes": self.max_processes,

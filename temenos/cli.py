@@ -7,6 +7,7 @@ deps — so the core CLI works without the `[cli]` extra.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from . import image
@@ -57,6 +58,36 @@ def _cmd_image_rm(args: argparse.Namespace) -> int:
     return 1
 
 
+def _cmd_serve(args: argparse.Namespace) -> int:
+    import json
+    import secrets
+
+    import uvicorn
+
+    from .manager import BoxManager
+    from .server.app import create_app
+    from .server.client import daemon_home, info_path
+
+    os.makedirs(daemon_home(), mode=0o700, exist_ok=True)
+    token = secrets.token_urlsafe(32)
+    url = f"http://127.0.0.1:{args.port}"
+    with open(info_path(), "w") as f:
+        json.dump({"url": url, "token": token, "pid": os.getpid()}, f)
+    mgr = BoxManager()
+    mgr.start_checkpoint_loop()                 # D17: periodic checkpoint of dirty boxes
+    app = create_app(manager=mgr, token=token)
+    print(f"temenos daemon on {url}")
+    try:
+        uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
+    finally:
+        mgr.shutdown()                          # tear down every box
+        try:
+            os.remove(info_path())
+        except OSError:
+            pass
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="temenos", description="trusted-agent box runtime")
     sub = p.add_subparsers(dest="group", required=True)
@@ -84,6 +115,10 @@ def build_parser() -> argparse.ArgumentParser:
     rm = isub.add_parser("rm", help="remove an image")
     rm.add_argument("name")
     rm.set_defaults(func=_cmd_image_rm)
+
+    srv = sub.add_parser("serve", help="run the temenos daemon (one per user)")
+    srv.add_argument("--port", type=int, default=int(os.environ.get("TEMENOS_PORT", "8839")))
+    srv.set_defaults(func=_cmd_serve)
     return p
 
 

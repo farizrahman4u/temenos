@@ -6,9 +6,9 @@ Session contract (held-foreground pattern, since rootless can't `create`+`start`
   exec()  -> `runsc <exec-globals> exec [-cwd][-env] <cid> -- <cmd>`.
   close() -> `runsc kill <cid> KILL`; reap held child; `runsc delete --force`; cleanup.
 
-Key flags: `--overlay2=all:memory` (writes never touch the host — verified),
-`--network=none` (v1), `--platform` auto-detected (kvm→systrap→ptrace), and a per-box
-`systemd-run --user --scope` for enforced memory/pids limits (D6).
+Key flags: `--overlay2=root:dir=<box dir>` (disk-backed, checkpointable; `root:memory`
+only for scratch='memory'), `--network=none|host` (D3), `--platform` auto-detected
+(kvm→systrap→ptrace), and a per-box `systemd-run --user --scope` for enforced memory (D6).
 """
 from __future__ import annotations
 
@@ -36,8 +36,11 @@ class GVisorBackend(Backend):
     name = "gvisor"
     _platform_cache: str | None = None
 
-    def __init__(self, *, runsc: str = "runsc") -> None:
+    def __init__(self, *, runsc: str = "runsc", work_dir: str | None = None) -> None:
+        # work_dir: put state/bundle/overlay under this box data dir (D16,
+        # everything-in-.temenos). None → ephemeral temp dirs.
         self._runsc = runsc
+        self._work_dir = work_dir
         self._cid: str | None = None
         self._bundle: str | None = None
         self._state: str | None = None
@@ -157,10 +160,16 @@ class GVisorBackend(Backend):
         self._policy = policy
         self._base_env = dict(env or {})
         self._cid = name or f"temenos-{uuid.uuid4().hex[:12]}"
-        self._state = tempfile.mkdtemp(prefix="temenos-state-")
-        self._bundle = tempfile.mkdtemp(prefix="temenos-bundle-")
+        if self._work_dir:
+            os.makedirs(self._work_dir, exist_ok=True)
+            self._state = os.path.join(self._work_dir, "state")
+            self._bundle = os.path.join(self._work_dir, "bundle")
+        else:
+            self._state = tempfile.mkdtemp(prefix="temenos-state-")
+            self._bundle = tempfile.mkdtemp(prefix="temenos-bundle-")
         self._overlay_dir = os.path.join(self._state, "overlay")  # disk-backed root upper
-        os.makedirs(self._overlay_dir, exist_ok=True)
+        for d in (self._state, self._bundle, self._overlay_dir):
+            os.makedirs(d, exist_ok=True)
         # resolve a box image (runner-owned writable rootfs) if the policy names one
         image_rootfs = None
         if policy.image:
@@ -219,7 +228,7 @@ class GVisorBackend(Backend):
                 return ""
         return ""
 
-    def _alive(self) -> bool:
+    def alive(self) -> bool:
         return self._held is not None and self._held.poll() is None
 
     def exec(
@@ -233,7 +242,7 @@ class GVisorBackend(Backend):
     ) -> ExecResult:
         if self._cid is None:
             raise BackendError("backend is not open")
-        if not self._alive():
+        if not self.alive():
             raise BackendError("box is not running (held process exited — OOM-killed?)")
 
         argv = self._ctl_globals() + ["exec"]
@@ -267,11 +276,12 @@ class GVisorBackend(Backend):
             duration_ms=int((time.monotonic() - started) * 1000),
         )
 
-    def fscheckpoint(self, dest: str) -> None:
+    def fscheckpoint(self, dest: str, *, leave_running: bool = True) -> None:
         """Save the box's filesystem (the overlay) to `dest` (restore via runsc
-        `-fs-restore-image-path`). Requires a disk-backed overlay (scratch='disk');
-        scratch='memory' produces an empty checkpoint."""
-        if self._cid is None or not self._alive():
+        `-fs-restore-image-path`). Requires a disk-backed overlay (scratch='disk').
+        `leave_running` (default True) keeps the box alive — without `-leave-running`
+        gVisor STOPS the box after checkpointing (verified ~30 ms either way)."""
+        if self._cid is None or not self.alive():
             raise BackendError("box is not running; cannot checkpoint")
         if self._policy and self._policy.scratch == "memory":
             raise BackendError(
@@ -279,8 +289,11 @@ class GVisorBackend(Backend):
                 "not checkpointable. Recreate the box with scratch='disk'."
             )
         os.makedirs(dest, exist_ok=True)
-        r = subprocess.run(self._ctl_globals() + ["fscheckpoint", "--image-path", dest, self._cid],
-                           capture_output=True, text=True)
+        cmd = self._ctl_globals() + ["fscheckpoint", "--image-path", dest]
+        if leave_running:
+            cmd.append("--leave-running")
+        cmd.append(self._cid)
+        r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
             raise BackendError(f"fscheckpoint failed: {r.stderr.strip()[-300:]}")
 
