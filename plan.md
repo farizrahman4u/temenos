@@ -699,9 +699,14 @@ that mode.
   config + bans; **leak battery `tests/leak/`** (no host write, host secrets invisible incl.
   `/proc/1/root` pivot, no network, /proc-is-box, D6 memory cap OOM-kills). **118 green, 2
   skipped.** (Durability already shipped in Phase 3/§8f: box-dir checkpoint + restore-on-use.)
-- **Phase 6 — polish & release:** README (threat model, multi-tenancy, ptrace/WSL notes,
-  the systemd-delegation requirement for limits (D6), and the one honest limit: no v1
-  network filtering), examples (sample Claude config), PyPI.
+- **Phase 6 — polish & release. ✅ DONE.** `README.md` (threat model, how-it-works diagram,
+  install incl. runsc + mmdebstrap, project/claude/Python quickstarts, CLI table, security
+  properties + honest limits: network-is-a-toggle-not-a-firewall, systemd-delegation for D6,
+  WSL ptrace, side channels). `examples/` (`python_api.py` — runs end-to-end on gVisor;
+  `claude_mcp_config.json` + a sole-execution-path wiring guide). `temenos version`.
+  `pyproject` cleaned (dropped unused click/rich; `[daemon]`/`[all]` extras; keywords,
+  classifiers, urls). **Wheel builds** (hatchling, 54 KB, `py.typed`, LICENSE, console
+  entry point). Apache-2.0 `LICENSE`. **118 green, 2 skipped.**
 
 (Swarm — `mgr.map(...)` over N boxes — is optional sugar; add if needed, else post-v1.)
 

@@ -1,0 +1,12 @@
+{
+  "_comment": "Sample of the MCP config temenos writes for `temenos claude`. The daemon URL + box id + token are filled in at launch (see .temenos/<box>/mcp.json). Shown here so other MCP-capable harnesses can wire the same box-scoped data plane manually. Pair it with the harness's tool-deny controls so the box's tools are the SOLE execution path.",
+  "mcpServers": {
+    "temenos": {
+      "type": "http",
+      "url": "http://127.0.0.1:8839/mcp/<box-id>",
+      "headers": {
+        "Authorization": "Bearer <daemon-token>"
+      }
+    }
+  }
+}

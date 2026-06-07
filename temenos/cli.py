@@ -380,6 +380,12 @@ def _cmd_claude(args: argparse.Namespace) -> int:
     return 0                          # unreachable
 
 
+def _cmd_version(args: argparse.Namespace) -> int:
+    from . import __version__
+    print(f"temenos {__version__}")
+    return 0
+
+
 def _cmd_doctor(args: argparse.Namespace) -> int:
     """Quick capability check: gVisor + platform, mmdebstrap, systemd memory enforcement."""
     from .backends.gvisor import GVisorBackend
@@ -497,6 +503,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     doc = sub.add_parser("doctor", help="check gVisor/platform/limits capability")
     doc.set_defaults(func=_cmd_doctor)
+
+    ver = sub.add_parser("version", help="print the temenos version")
+    ver.set_defaults(func=_cmd_version)
     return p
 
 

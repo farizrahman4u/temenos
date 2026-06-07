@@ -9,17 +9,34 @@ description = "Untrusted-code containment for a trusted agent — named gVisor b
 requires-python = ">=3.11"
 readme = "README.md"
 license = { text = "Apache-2.0" }
+keywords = ["sandbox", "gvisor", "agent", "mcp", "claude", "containment", "security"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries",
+]
 # Core has zero runtime deps; isolation is the `runsc` binary (detected at runtime).
 dependencies = []
 
 [project.optional-dependencies]
-mcp = ["mcp", "fastapi", "uvicorn"]            # MCP + REST daemon surface
-cli = ["click", "rich", "httpx"]               # CLI surface
-all = ["temenos[mcp,cli]"]
+# The daemon (REST + per-box MCP) and the CLI's daemon client. The CLI itself is stdlib
+# argparse; `httpx` is only needed by the project commands that talk to the daemon, which
+# (via auto-spawn of `temenos serve`) also pulls fastapi/uvicorn/mcp. So the project flow
+# and `temenos claude` want `[all]`; the pure `temenos image …` commands need nothing extra.
+daemon = ["fastapi", "uvicorn", "mcp>=1.0", "httpx"]
+all = ["temenos[daemon]"]
 dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
 
+[project.urls]
+Homepage = "https://github.com/quilter-ai/temenos"
+Source = "https://github.com/quilter-ai/temenos"
+
 [project.scripts]
-temenos = "temenos.cli:main"                    # only meaningful with the [cli] extra
+temenos = "temenos.cli:main"                    # `temenos image …` works bare; rest need [all]
 
 [tool.hatch.build.targets.wheel]
 packages = ["temenos"]
