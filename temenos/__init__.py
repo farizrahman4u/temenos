@@ -14,7 +14,7 @@ from .exceptions import (
 )
 from .box import Box
 from .exceptions import StorageError
-from .image import Image, build_host_snapshot, build_minimal, list_images
+from .image import Image, build_download, build_host_copy, build_minimal, list_images
 from .policy import Policy, TrustLevel
 from .result import AuditEntry, AuditLog, ExecResult, PolicyDecision
 from .storage import DiskVolume, MemoryVolume, Mount, StorageProvider
@@ -32,7 +32,8 @@ __all__ = [
     "StorageError",
     "Image",
     "build_minimal",
-    "build_host_snapshot",
+    "build_host_copy",
+    "build_download",
     "list_images",
     "ExecResult",
     "AuditEntry",

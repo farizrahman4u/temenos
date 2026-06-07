@@ -38,6 +38,35 @@ def test_policy_image_round_trips():
     assert Policy.from_dict(p.to_dict()).image == "ubuntu-base"
 
 
+def test_host_copy_refuses_without_force(tmp_path, monkeypatch):
+    from temenos import build_host_copy
+    from temenos.exceptions import TemenosError
+    monkeypatch.setenv("TEMENOS_DATA", str(tmp_path))
+    with pytest.raises(TemenosError, match="force"):
+        build_host_copy("hc")            # no force=True -> must refuse the 16G copy
+
+
+def test_build_download_extracts_and_preps_apt(tmp_path, monkeypatch):
+    import tarfile
+    from temenos import build_download
+    monkeypatch.setenv("TEMENOS_DATA", str(tmp_path / "data"))
+    # a tiny fake base rootfs (with an apt-get) packed as a tarball, served via file://
+    src = tmp_path / "src"
+    (src / "usr/bin").mkdir(parents=True)
+    (src / "etc").mkdir()
+    (src / "usr/bin/apt-get").write_text("#!/bin/sh\n")
+    tarp = tmp_path / "rootfs.tar"
+    with tarfile.open(tarp, "w") as t:
+        t.add(src, arcname=".")
+    img = build_download("dl", f"file://{tarp}")
+    assert img.exists()
+    conf = os.path.join(img.rootfs, "etc/apt/apt.conf.d/99temenos")
+    assert os.path.exists(conf)
+    body = open(conf).read()
+    assert 'Sandbox::User "root"' in body and "ForceIPv4" in body
+    # DNS is NOT baked into the image — it's injected from the host at box start (network)
+
+
 # -- integration: a box booted from the image has a WRITABLE /usr ---------------------
 
 @gvisor
@@ -58,6 +87,20 @@ def test_image_writes_are_ephemeral_not_on_host(tmp_path, monkeypatch):
         box.exec(["/bin/sh", "-c", "echo MODIFIED > /usr/lib/marker"])
     # the image (overlay lower) must be untouched — writes went to the ephemeral upper
     assert not os.path.exists(os.path.join(img.rootfs, "usr/lib/marker"))
+
+
+@gvisor
+def test_network_box_gets_host_resolver_injected(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEMENOS_DATA", str(tmp_path))
+    build_minimal("mini-net")
+    try:
+        host_resolv = open("/etc/resolv.conf", "rb").read().decode("utf-8", "replace")
+    except OSError:
+        pytest.skip("no host /etc/resolv.conf")
+    with Box("net-img", Policy(image="mini-net", network=True)) as box:
+        in_box = box.read_file("/etc/resolv.conf")
+    # the box's resolv.conf is the host's (injected at start), not a baked placeholder
+    assert in_box.strip() == host_resolv.strip()
 
 
 @gvisor

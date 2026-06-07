@@ -15,8 +15,11 @@ from ..result import ExecResult
 
 class Backend(ABC):
     @abstractmethod
-    def open(self, policy: Policy, *, name: str, env: dict[str, str] | None = None) -> None:
-        """Stand up the persistent sandbox for `policy`. Idempotent failure → BackendError."""
+    def open(self, policy: Policy, *, name: str, env: dict[str, str] | None = None,
+             restore_from: str | None = None) -> None:
+        """Stand up the persistent sandbox for `policy`. If `restore_from` is a checkpoint
+        dir (from a prior `fscheckpoint`), seed the box's filesystem from it. Idempotent
+        failure → BackendError."""
 
     @abstractmethod
     def exec(

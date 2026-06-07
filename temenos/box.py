@@ -24,12 +24,14 @@ class Box:
         backend: Backend | None = None,
         tenant: str | None = None,
         env: dict[str, str] | None = None,
+        restore_from: str | None = None,
     ) -> None:
         self.name = name
         self.policy = policy
         self.tenant = tenant
         self.audit = AuditLog()
         self._env = env
+        self._restore_from = restore_from
         self._opened = False
         if backend is None:
             from .backends.gvisor import GVisorBackend
@@ -40,10 +42,12 @@ class Box:
 
     def start(self) -> "Box":
         if not self._opened:
-            self._backend.open(self.policy, name=self.name, env=self._env)
+            self._backend.open(self.policy, name=self.name, env=self._env,
+                               restore_from=self._restore_from)
             self._opened = True
             self.audit.record("open", PolicyDecision.ALLOW,
-                              {"backend": self._backend.name}, box=self.name)
+                              {"backend": self._backend.name,
+                               "restored_from": self._restore_from}, box=self.name)
         return self
 
     def commit(self) -> None:
@@ -52,6 +56,17 @@ class Box:
         commit = getattr(self._backend, "commit", None)
         if callable(commit):
             commit()
+
+    def checkpoint(self, dest: str) -> None:
+        """Save the box's filesystem to `dest`. Needs scratch='disk' (the default);
+        a scratch='memory' box cannot be checkpointed. Restore by creating a new box with
+        `Box(name, policy, restore_from=dest)`."""
+        self._require_open()
+        fscheckpoint = getattr(self._backend, "fscheckpoint", None)
+        if not callable(fscheckpoint):
+            raise RuntimeError("backend does not support checkpointing")
+        fscheckpoint(dest)
+        self.audit.record("checkpoint", PolicyDecision.ALLOW, {"dest": dest}, box=self.name)
 
     def close(self) -> None:
         if self._opened:

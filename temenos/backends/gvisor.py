@@ -41,6 +41,7 @@ class GVisorBackend(Backend):
         self._cid: str | None = None
         self._bundle: str | None = None
         self._state: str | None = None
+        self._overlay_dir: str | None = None
         self._held: subprocess.Popen | None = None
         self._policy: Policy | None = None
         self._base_env: dict[str, str] = {}
@@ -87,11 +88,19 @@ class GVisorBackend(Backend):
         # v1 simple toggle: full passthrough (host) or isolated (none). No filtering.
         return "host" if (self._policy and self._policy.network) else "none"
 
+    def _overlay2(self) -> str:
+        # disk (default): root overlay backed on disk → not RAM-bound AND checkpointable.
+        # memory (opt-in): RAM-backed → fast but RAM-bound and CANNOT be checkpointed.
+        if self._policy and self._policy.scratch == "memory":
+            log.warning("box %s: scratch='memory' — writes are RAM-bound and this box "
+                        "CANNOT be checkpointed (fscheckpoint needs a disk-backed overlay). "
+                        "Use scratch='disk' (default) for checkpointable boxes.", self._cid)
+            return "root:memory"
+        return f"root:dir={self._overlay_dir}"
+
     def _run_globals(self, platform: str) -> list[str]:
-        # root:memory => root/system writes are ephemeral RAM (host untouched); volume
-        # mounts (disk binds, tmpfs) keep their own semantics (disk = durable).
         return [self._runsc, f"--root={self._state}", "--rootless", f"--network={self._net_mode()}",
-                "--ignore-cgroups", "--overlay2=root:memory", f"--platform={platform}"]
+                "--ignore-cgroups", f"--overlay2={self._overlay2()}", f"--platform={platform}"]
 
     def _ctl_globals(self) -> list[str]:
         # exec/state/kill/delete join the running sandbox; no --overlay2 needed.
@@ -117,9 +126,14 @@ class GVisorBackend(Backend):
 
     # -- lifecycle --------------------------------------------------------------------
 
-    def open(self, policy: Policy, *, name: str, env: dict[str, str] | None = None) -> None:
+    def open(self, policy: Policy, *, name: str, env: dict[str, str] | None = None,
+             restore_from: str | None = None) -> None:
         if self._held is not None:
             raise BackendError("backend already open")
+        if restore_from and policy.scratch == "memory":
+            raise BackendError("restore needs a disk-backed overlay; use scratch='disk'")
+        if restore_from and not os.path.isdir(restore_from):
+            raise BackendError(f"restore checkpoint dir not found: {restore_from!r}")
         if policy.network:
             log.warning("box %s: network=host (full passthrough, NO firewalling) — the "
                         "box can reach localhost, the LAN, cloud metadata, and exfiltrate "
@@ -145,6 +159,8 @@ class GVisorBackend(Backend):
         self._cid = name or f"temenos-{uuid.uuid4().hex[:12]}"
         self._state = tempfile.mkdtemp(prefix="temenos-state-")
         self._bundle = tempfile.mkdtemp(prefix="temenos-bundle-")
+        self._overlay_dir = os.path.join(self._state, "overlay")  # disk-backed root upper
+        os.makedirs(self._overlay_dir, exist_ok=True)
         # resolve a box image (runner-owned writable rootfs) if the policy names one
         image_rootfs = None
         if policy.image:
@@ -155,15 +171,33 @@ class GVisorBackend(Backend):
             m.provider.prepare(self._cid)
         oci.build_bundle(policy, self._bundle, env=env, image_rootfs=image_rootfs)
 
-        run_cmd = (self._scope_prefix(policy)
-                   + self._run_globals(platform)
-                   + ["run", "-bundle", self._bundle, self._cid])
+        run_flags = ["run", "-bundle", self._bundle]
+        if restore_from:
+            run_flags.append(f"-fs-restore-image-path={restore_from}")
+        run_flags.append(self._cid)
+        run_cmd = self._scope_prefix(policy) + self._run_globals(platform) + run_flags
         self._held = subprocess.Popen(run_cmd, stdout=subprocess.DEVNULL,
                                       stderr=subprocess.PIPE, text=True)
         if not self._wait_running():
             err = self._drain_held_stderr()
             self.close()
             raise BackendError(f"box failed to start: {err or 'held process exited'}")
+        # network passthrough boxes need DNS. In image mode `/etc` is the (writable) image,
+        # so inject the HOST's current resolver (matches the shared netns — corporate/split/
+        # WSL stub, whatever the host uses). Host-bind boxes already see the host's /etc.
+        if policy.network and policy.image:
+            self._inject_host_resolv_conf()
+
+    def _inject_host_resolv_conf(self) -> None:
+        try:
+            with open("/etc/resolv.conf", "rb") as f:   # follows symlinks -> resolved content
+                data = f.read()
+        except OSError:
+            log.warning("no host /etc/resolv.conf to inject; DNS may not work in the box")
+            return
+        # replace any symlink with a real file, then write the host's resolver
+        self.exec(["/bin/sh", "-c", "rm -f /etc/resolv.conf && cat > /etc/resolv.conf"],
+                  stdin=data)
 
     def _wait_running(self) -> bool:
         deadline = time.monotonic() + _START_TIMEOUT_S
@@ -232,6 +266,23 @@ class GVisorBackend(Backend):
             truncated=truncated,
             duration_ms=int((time.monotonic() - started) * 1000),
         )
+
+    def fscheckpoint(self, dest: str) -> None:
+        """Save the box's filesystem (the overlay) to `dest` (restore via runsc
+        `-fs-restore-image-path`). Requires a disk-backed overlay (scratch='disk');
+        scratch='memory' produces an empty checkpoint."""
+        if self._cid is None or not self._alive():
+            raise BackendError("box is not running; cannot checkpoint")
+        if self._policy and self._policy.scratch == "memory":
+            raise BackendError(
+                "cannot checkpoint a scratch='memory' box — its overlay is RAM-backed and "
+                "not checkpointable. Recreate the box with scratch='disk'."
+            )
+        os.makedirs(dest, exist_ok=True)
+        r = subprocess.run(self._ctl_globals() + ["fscheckpoint", "--image-path", dest, self._cid],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise BackendError(f"fscheckpoint failed: {r.stderr.strip()[-300:]}")
 
     def commit(self) -> None:
         """Persist provider-backed volumes (e.g. fsspec upload). Disk/memory are no-ops."""

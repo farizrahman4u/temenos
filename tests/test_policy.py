@@ -151,3 +151,11 @@ def test_root_read_allows_everything():
 def test_network_round_trips_as_bool():
     assert Policy(network=True).to_dict()["network"] is True
     assert Policy.from_dict({"network": "host"}).network is True
+
+
+def test_scratch_defaults_to_disk_and_validates():
+    assert Policy().scratch == "disk"                 # checkpointable by default
+    assert Policy(scratch="memory").scratch == "memory"
+    with pytest.raises(ValueError):
+        Policy(scratch="ram")
+    assert Policy.from_dict(Policy(scratch="memory").to_dict()).scratch == "memory"

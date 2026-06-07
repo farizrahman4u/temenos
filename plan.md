@@ -125,7 +125,7 @@ temenos/                         # (v1) built in v1 · (post) specified, deferre
 │   │   ├── mcp.py           # (v1) per-box MCP sub-app (temenos_exec/read/write/list)
 │   │   └── auth.py          # (v1) bearer token -> tenant
 │   │
-│   ├── cli.py               # (v1) thin REST client (create/ls/exec/shell/rm/claude/serve)
+│   ├── cli.py               # (v1) stdlib CLI; `image build/ls/rm` done · box cmds (create/exec/shell/serve) = Phase 3
 │   ├── harness/
 │   │   ├── claude.py        # (v1) `temenos claude`: wire MCP + ban native tools
 │   │   └── jail.py          # (post) run a whole harness inside a box (Codex etc.)
@@ -164,7 +164,8 @@ Phase 0 spike.
 | D4 | Surfaces | **Core lib → FastAPI daemon (REST + MCP) + thin CLI.** One core, multiple adapters. | §7 layering. |
 | D5 | seccomp | **gVisor's built-in interception.** Hand-rolled cBPF is post-v1 (native only). | gVisor's filtering is stronger and already written. |
 | D6 | Resource limits | **Per-box `systemd-run --user --scope`** with `MemoryMax`/`MemorySwapMax=0`/`CPUQuota`/`TasksMax` from `Policy` (spike-verified: enforces, unprivileged, works from any cgroup). Direct delegated child cgroup is an optimization when the daemon runs inside `user@.service`. Fallback if no systemd user-delegation: warn + unenforced. | gVisor has no internal cap; cgroups are the only lever, and the user manager makes them unprivileged-per-box. |
-| D7 | Box filesystem | **Writable root, ephemeral in RAM** (`--overlay2=root:memory`): tooling (pip/npm/builds) works, writes stay off the host (verified). Durable/remote storage is explicit, via **storage providers** (D12). | Separates "box scribbling in /usr" (ephemeral) from "the workspace" (explicit, managed). |
+| D7 | Box filesystem | **Writable root, ephemeral, disk-backed by default** (`Policy.scratch="disk"` → `--overlay2=root:dir=<per-box dir>`): tooling (pip/npm/builds) works, writes stay off the host, AND the box is **checkpointable** (D14). `scratch="memory"` (`root:memory`) is a fast RAM-backed opt-in that is **RAM-bound and NOT checkpointable** — backend warns; `checkpoint()` refuses it. Durable/remote storage is explicit via providers (D12). | Default must be checkpointable; memory is an explicit, warned escape hatch. |
+| D14 | Scratch medium / checkpoint | **`Policy.scratch="disk"` default** (`root:dir`, disk-backed): not RAM-bound + **checkpointable** (`Box.checkpoint` → `fscheckpoint`, verified). `scratch="memory"` (`root:memory`) is a warned opt-in: RAM-bound + **cannot checkpoint** (`checkpoint()` refuses it). | `root:memory` blocks fscheckpoint, so it must not be the silent default. |
 | D12 | Storage providers | **Pluggable `StorageProvider`** mounted at box paths. v1: **MemoryVolume** (tmpfs, ephemeral) + **DiskVolume** (host dir, durable, contained: realpath + optional `allowed_root`, and gVisor's mount-ns stops in-box `..`). Post-v1: **FsspecVolume** (s3/azure/… via fsspec; sync-on-commit; remote I/O runs on the host so the box stays network-less). `read`/`write` are sugar for ro/rw DiskVolumes. | Everything resolves to one box mount — providers differ in backing + commit/cleanup. Pluggable in Python = the extension point. |
 | D8 | Sandbox env | **Minimal env** (`PATH`,`HOME=/tmp`,`LANG`); host env **not** inherited; caller adds via `env=`. | Host env may hold secrets (`ANTHROPIC_API_KEY`). |
 | D9 | Backend select | v1 gVisor only. `TrustLevel` gates **policy strictness** (net/limits/mounts), not backend. `HOST` = explicit no-sandbox escape hatch. | Multi-backend selection returns when native lands. |
@@ -214,26 +215,40 @@ system-installed packages (ro) + whatever is mounted in**.
   in a rootless box: host-root-owned files map to `nobody` (65534) so box-root can't
   write them — it's **uid mapping, not overlay** (verified: `/usr` shows owner 65534).
   The fix is a **runner-owned image** (`temenos/image.py`, `Policy.image=<name>`): the box
-  root is a rootfs *owned by the box-runner*, so `--overlay2=root:memory` makes the whole
-  root — `/usr`,`/etc`,`/var` — **writable-ephemeral**, while disk volumes stay durable.
+  root is a rootfs *owned by the box-runner*, so the root overlay (disk/memory, D14) makes
+  the whole root — `/usr`,`/etc`,`/var` — **writable-ephemeral**, while disk volumes stay durable.
   The image is the shared lower (built once); each box gets its own memory upper → no
-  per-box copy. Builders: `build_minimal` (thin, ldd-resolved) and `build_host_snapshot`
-  (full host copy); `mmdebstrap`/`skopeo` later. **Verified**: an image box writes
-  `/usr/lib/...`, host image untouched. Needed for `apt`/system-`pip` (+ `network=True`). This also
-  gives runtime *version* choice (today every box inherits the host's system Python 3.12).
-- **`/usr` writes are ephemeral and NOT host-persisted.** The root overlay upper is
-  *ephemeral*, but its **medium is a knob** (verified): `root:memory` backs it in RAM
-  (counts against `MemoryMax` — a 400 MB write in a 256 MB box OOMs); `root:dir=<scratch
-  disk>` backs it on disk (same 400 MB write succeeds) → ephemeral writes can exceed the
-  RAM limit. `dir=` is NOT persistence — gVisor allocates the backing anonymously
-  (unlinked; the dir looks empty) and discards it on teardown. So expose a scratch-medium
-  choice (default `memory`; `dir=` for write-heavy boxes), and keep persistence separate.
-- **Persisting writes is deliberate and separate:** (a) **mount a `DiskVolume`** at the
-  path you want durable; (b) **gVisor `fscheckpoint` + `-fs-restore-image-path`** —
-  **verified** to save/restore the box filesystem **when the overlay is disk-backed**
-  (`root:self` or `root:dir=`, NOT `memory`); gVisor-experimental but works rootless. So
-  checkpointable boxes opt into a disk-backed overlay medium; (c) **commit-to-image** to
-  bake the modified root into a new reusable image.
+  per-box copy. Pluggable builder registry (`image.build(name, builder=…)`) + a
+  `temenos image build/ls/rm` CLI. Builders: **`download`** (extract a prebuilt rootfs
+  tarball, e.g. Ubuntu base — robust everywhere, **e2e-verified**, recommended on WSL2),
+  `mmdebstrap` (clean apt base — preferred on normal Linux, but its unshare mode **fails
+  on this WSL2 kernel**), `minimal` (thin ldd-resolved, for tests), `host-copy` (full host
+  copy — **guarded by `--force-copy`** so a 16 GB `/usr` is never duplicated silently).
+  **e2e VERIFIED (both `download` and `mmdebstrap`)**: build → box (`network=True`) →
+  `apt-get update` + `apt-get install cowsay` succeed and the binary runs, no manual flags.
+  - **mmdebstrap on WSL2 recipe** (native unshare mode fails here): drive the userns
+    ourselves — `unshare --map-root-user --map-auto -- mmdebstrap --mode=root
+    --skip=setup/mknod --skip=chroot/mount/dev --skip=chroot/mount`, host distro suite+mirror
+    (host keyring; `variant=apt` to include apt), a SHORT ext4 `TMPDIR` (hook socket has a
+    ~108-char limit; the session `/tmp` also breaks it), tarball out, extract
+    `--no-same-owner --exclude=./dev/*` (non-root can't mknod; gVisor provides /dev).
+  - **apt-in-box fixes** auto-baked into `/etc/apt/apt.conf.d/99temenos`:
+    `APT::Sandbox::User "root"` (uid-drop to `_apt` breaks in-box) + `Acquire::ForceIPv4`
+    (IPv6 doesn't route through the passthrough).
+  - **DNS**: the backend injects the **host's** `/etc/resolv.conf` into image-mode network
+    boxes at start (not a baked resolver) — matches the shared netns.
+  Images also give runtime *version* choice (host-bind boxes inherit the host's Python 3.12).
+- **Scratch medium = `Policy.scratch` (D14), default `"disk"`.** The root overlay upper is
+  ephemeral either way; the medium is a knob (verified): `disk` (`root:dir=<box dir>`) is
+  disk-backed → not RAM-bound (a 400 MB write in a 256 MB box succeeds) **and
+  checkpointable**; `memory` (`root:memory`) is RAM-backed → fast but RAM-bound (same
+  write OOMs) **and NOT checkpointable**. So `disk` is the default; `memory` is an explicit
+  opt-in the backend **warns** about, and `Box.checkpoint()` **refuses** a memory box.
+- **Persisting writes is deliberate and separate:** (a) **mount a `DiskVolume`**;
+  (b) **checkpoint/restore** — `Box.checkpoint(dest)` → `fscheckpoint`, and
+  `Box(name, policy, restore_from=dest)` → `runsc run -fs-restore-image-path` seeds a
+  fresh box's filesystem from the checkpoint. **Roundtrip verified** for `scratch="disk"`
+  (rootless; gVisor-experimental); (c) **commit-to-image** to bake the root into a new image.
 
 ---
 
@@ -449,7 +464,10 @@ path is the box's MCP tools, every host-touching native tool banned:
 ## 9. gVisor backend contract (verified)
 
 Global flags: `--root=<per-box state dir> --rootless --network=<none|host>
---ignore-cgroups --overlay2=root:memory --platform=<auto-detected>`. Network: `none`
+--ignore-cgroups --overlay2=<root:dir=<box dir>|root:memory> --platform=<auto-detected>`.
+Overlay: **disk-backed `root:dir` by default** (`Policy.scratch="disk"` — checkpointable,
+not RAM-bound); `root:memory` only on `scratch="memory"` (warned, not checkpointable, D14).
+Network: `none`
 (default, with the netns kept) or `host` (passthrough, with the netns **dropped** from
 the OCI spec — both required, D3). **Platform is auto-detected, not hardcoded** — it's a
 performance/compatibility choice; the security model (the gVisor sentry) is identical
@@ -463,8 +481,9 @@ gets systrap.
   bundle: writable `rootfs/` with usrmerge symlinks + read-only bind of host `/usr`,`/etc`;
   tmpfs `/tmp`,`/dev`; `proc`; plus the provider mounts (D12) and `read`/`write` disk
   binds. Write `config.json` from `Policy`: namespaces incl. network, minimal env (D8),
-  empty caps, RLIMIT_NPROC/CPU. Global flag **`--overlay2=root:memory`** (writable root,
-  ephemeral in RAM, host-safe — verified). Start a **held** child wrapping `runsc` in a
+  empty caps, RLIMIT_NPROC/CPU. Overlay: `--overlay2=root:dir=<state>/overlay` (disk,
+  checkpointable, default) or `root:memory` (`scratch="memory"`, warned). Writable root,
+  ephemeral, host-safe — verified. Start a **held** child wrapping `runsc` in a
   per-box systemd scope for enforced memory (D6):
   `systemd-run --user --scope -q -p MemoryMax=<mem> -p MemorySwapMax=0
   -- runsc <global> run -bundle <dir> <cid>` (NB: no `TasksMax` — it would starve the
@@ -696,6 +715,10 @@ with a Python-native policy and a real audit trail.**
 ```bash
 uname -r                                   # need ≥5.11 (overlay), 6.6 here ✓
 sudo apt-get install -y runsc              # gVisor (the v1 isolation engine)
+sudo apt-get install -y mmdebstrap uidmap  # 'mmdebstrap' image builder (clean apt base)
+                                           #  uidmap (newuidmap) + /etc/subuid required;
+                                           #  works on WSL2 via the self-unshare recipe.
+                                           #  'download' builder needs nothing extra.
 # post-v1 networking: sudo apt-get install -y passt nftables
 
 python -m venv .venv && source .venv/bin/activate

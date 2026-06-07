@@ -88,6 +88,11 @@ class Policy:
     # (pip/apt/npm) — see image.py.
     image: str | None = None
 
+    # Root-overlay scratch medium: "disk" (default — disk-backed, **checkpointable**,
+    # not RAM-bound) or "memory" (RAM — fast, but RAM-bound AND **cannot be
+    # checkpointed**; opt-in, backend warns).
+    scratch: str = "disk"
+
     # Resource limits (enforced per-box via the systemd scope; see plan §9/D6).
     max_memory_mb: int = 256
     max_cpu_seconds: int = 30
@@ -110,6 +115,8 @@ class Policy:
         object.__setattr__(self, "network", _coerce_network(self.network))
         if self.image is not None and not isinstance(self.image, str):
             raise TypeError(f"image must be a str name or None, got {type(self.image).__name__}")
+        if self.scratch not in ("disk", "memory"):
+            raise ValueError(f"scratch must be 'disk' or 'memory', got {self.scratch!r}")
         object.__setattr__(self, "trust", _coerce_trust(self.trust))
         for f in _INT_FIELDS:
             v = getattr(self, f)
@@ -167,13 +174,14 @@ class Policy:
         # provider volumes and the base image are not subset-narrowed — see plan).
         merged["mounts"] = self.mounts
         merged["image"] = self.image
+        merged["scratch"] = self.scratch
         return Policy(**merged)  # type: ignore[arg-type]
 
     # -- plain-data round trip (shared by REST/MCP/CLI/config) -----------------------
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> "Policy":
-        unknown = set(data) - set(_ALL_FIELDS) - {"mounts", "image"}
+        unknown = set(data) - set(_ALL_FIELDS) - {"mounts", "image", "scratch"}
         if unknown:
             raise ValueError(f"unknown policy field(s): {sorted(unknown)}")
         kwargs: dict[str, object] = {}
@@ -191,6 +199,8 @@ class Policy:
             kwargs["mounts"] = tuple(Mount.from_dict(m) for m in data["mounts"])  # type: ignore[union-attr]
         if "image" in data:
             kwargs["image"] = data["image"]
+        if "scratch" in data:
+            kwargs["scratch"] = data["scratch"]
         return cls(**kwargs)  # type: ignore[arg-type]
 
     def to_dict(self) -> dict[str, object]:
@@ -200,6 +210,7 @@ class Policy:
             "network": self.network,
             "mounts": [m.to_dict() for m in self.mounts],
             "image": self.image,
+            "scratch": self.scratch,
             "max_memory_mb": self.max_memory_mb,
             "max_cpu_seconds": self.max_cpu_seconds,
             "max_processes": self.max_processes,

@@ -112,6 +112,41 @@ def test_exit_code_propagates():
         assert box.exec(["sh", "-c", "exit 7"]).exit_code == 7
 
 
+def test_default_box_is_checkpointable(tmp_path):
+    # scratch defaults to 'disk' → fscheckpoint captures the filesystem
+    import os
+    with _box("t-ckpt") as box:
+        box.write_file("/tmp/marker", "x")
+        dest = str(tmp_path / "ckpt")
+        box.checkpoint(dest)
+        assert os.path.getsize(os.path.join(dest, "multitar.img")) > 0
+
+
+def test_memory_scratch_box_cannot_checkpoint(tmp_path):
+    from temenos.exceptions import BackendError
+    with Box("t-mem-ckpt", Policy(scratch="memory")) as box:
+        with pytest.raises(BackendError, match="memory"):
+            box.checkpoint(str(tmp_path / "ck"))
+
+
+def test_checkpoint_then_restore_roundtrip(tmp_path):
+    dest = str(tmp_path / "ckpt")
+    with _box("t-ck-save") as box:
+        box.exec(["mkdir", "-p", "/opt/saved"])
+        box.write_file("/opt/saved/marker", "RESTORED_OK")
+        box.checkpoint(dest)
+    # a fresh box (same policy) restored from the checkpoint has the saved filesystem
+    with Box("t-ck-restore", Policy(), restore_from=dest) as box2:
+        assert box2.read_file("/opt/saved/marker") == "RESTORED_OK"
+
+
+def test_restore_from_missing_dir_errors(tmp_path):
+    from temenos.exceptions import BackendError
+    box = Box("t-ck-bad", Policy(), restore_from=str(tmp_path / "nope"))
+    with pytest.raises(BackendError, match="checkpoint dir not found"):
+        box.start()
+
+
 def _ifaces(box):
     r = box.exec(["sh", "-c", "awk -F: 'NR>2{print $1}' /proc/net/dev | tr -d ' '"])
     return {ln for ln in r.stdout.split() if ln}
