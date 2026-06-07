@@ -43,14 +43,18 @@ class BoxManager:
         self._loop_thread: threading.Thread | None = None
 
     def create(self, data_dir: str, policy: Policy, *, name: str | None = None,
-               env: dict[str, str] | None = None, restore_from: str | None = None) -> str:
+               env: dict[str, str] | None = None, restore_from: str | None = None,
+               cwd: str | None = None) -> str:
         """Create+start a box at `data_dir` (or return the running one — idempotent).
-        Returns the box id. Persists the policy to `<data_dir>/config.json`."""
+        Returns the box id. Persists the policy to `<data_dir>/config.json`. `cwd` sets the
+        box's default working dir for execs that don't pass one (e.g. an agent's MCP calls)."""
         os.makedirs(data_dir, exist_ok=True)
         bid = box_id(data_dir)
         existing = self._boxes.get(bid)
         if existing is not None:
             if existing.running:
+                if cwd is not None:
+                    existing.default_cwd = cwd   # keep an attached session's cwd current
                 return bid                      # ensure-semantics: already up
             self._boxes.pop(bid, None)          # crashed/dead → recreate below
         with open(os.path.join(data_dir, "config.json"), "w") as f:
@@ -62,7 +66,7 @@ class BoxManager:
             if os.path.isdir(cp) and os.listdir(cp):
                 restore_from = cp
         box = Box(name or bid, policy, backend=GVisorBackend(work_dir=data_dir),
-                  env=env, restore_from=restore_from)
+                  env=env, restore_from=restore_from, default_cwd=cwd)
         box.start()
         self._boxes[bid] = box
         self._dirs[bid] = os.path.realpath(data_dir)

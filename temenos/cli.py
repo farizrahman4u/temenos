@@ -189,6 +189,13 @@ def _ensure_running(client, data_dir: str, name: str) -> str:
     return client.create_box(data_dir, _load_box_policy(data_dir).to_dict(), name=name)["id"]
 
 
+def _box_cwd(scope: str) -> str:
+    """Where a session should land inside the box. A PROJECT box mounts the repo at its real
+    host path, so the host CWD exists in the box → use it (host dir == box dir). A GLOBAL box
+    has no repo mount → start at / (root)."""
+    return os.getcwd() if scope == "project" else "/"
+
+
 def _cmd_create(args: argparse.Namespace) -> int:
     from .project import DEFAULT_BOX, ensure_project, resolve_box
     from .server.client import connect_or_spawn
@@ -291,7 +298,10 @@ def _interactive_exec(ctx: dict, cmd: list[str], *, cwd: str | None = None,
     argv = list(ctx["argv"])
     if cwd:
         argv += ["-cwd", cwd]
-    for k, v in (env or {}).items():
+    # Forward TERM (host env isn't inherited into the box) so curses tools — clear, vim,
+    # less, top — work; default to a widely-supported value if the host hasn't set one.
+    env = {"TERM": os.environ.get("TERM") or "xterm-256color", **(env or {})}
+    for k, v in env.items():
         argv += ["-env", f"{k}={v}"]
     argv += [ctx["cid"], *cmd]
 
@@ -357,15 +367,47 @@ def _cmd_exec(args: argparse.Namespace) -> int:
     r = _resolve_scoped(args.name, glob=args.glob)
     client = connect_or_spawn()
     bid = _ensure_running(client, r.data_dir, args.name)
+    cwd = args.cwd or _box_cwd(r.scope)        # project box → host cwd; global → /
     if args.tty:
         # interactive: wire the local terminal into the box (REPLs, TUIs). The capturing
         # path can't carry a PTY, so attach locally. --timeout doesn't apply here.
-        return _interactive_exec(client.attach_context(bid), cmd, cwd=args.cwd)
-    res = client.exec(bid, cmd, cwd=args.cwd, timeout=args.timeout)
+        return _interactive_exec(client.attach_context(bid), cmd, cwd=cwd)
+    res = client.exec(bid, cmd, cwd=cwd, timeout=args.timeout)
     sys.stdout.write(res["stdout"])
     if res["stderr"]:
         sys.stderr.write(res["stderr"])
     return int(res["exit_code"])
+
+
+def _shell_banner(name: str, bid: str, scope: str, pol: Policy, data_dir: str) -> str:
+    """A welcome banner + at-a-glance box facts, framed in a (fittingly) box."""
+    home = os.path.expanduser("~")
+    shown_dir = "~" + data_dir[len(home):] if data_dir.startswith(home) else data_dir
+    rows = [
+        ("box", f"{name}  [{scope}]"),
+        ("id", bid),
+        ("network", "on  · full host passthrough" if pol.network
+                    else "off · isolated (no egress)"),
+        ("image", pol.image or "host /usr (read-only)"),
+        ("scratch", f"{pol.scratch}  ·  checkpoint={pol.checkpoint}"),
+        ("dir", shown_dir),
+    ]
+    title = "⬡ temenos · secure agent sandbox"
+    body = [f" {k:<8} {v}" for k, v in rows]
+    inner = min(62, max(len(title) + 1, *(len(b) for b in body)))
+
+    def fit(s: str) -> str:
+        return s if len(s) <= inner else s[: inner - 1] + "…"
+
+    top = "╭─ " + title + " " + "─" * max(0, inner - len(title) - 1) + "╮"
+    bottom = "╰" + "─" * (inner + 2) + "╯"
+    lines = [top] + [f"│ {fit(b).ljust(inner)} │" for b in body] + [bottom]
+
+    no_color = os.environ.get("NO_COLOR") is not None
+    dim, bold, reset = ("", "", "") if no_color else ("\033[2m", "\033[1m", "\033[0m")
+    out = [f"{bold}{lines[0]}{reset}"] + [f"{dim}{ln}{reset}" for ln in lines[1:]]
+    out.append(f"{dim}  host is invisible beyond policy · Ctrl-D or `exit` to leave{reset}")
+    return "\n".join(out)
 
 
 def _cmd_shell(args: argparse.Namespace) -> int:
@@ -380,8 +422,8 @@ def _cmd_shell(args: argparse.Namespace) -> int:
     if not _stdin_is_tty():
         raise TemenosError("temenos shell needs an interactive terminal "
                            "(use `temenos exec <box> -- <cmd>` for non-interactive runs)")
-    print(f"temenos shell -> {args.name} (box {bid}); Ctrl-D or `exit` to leave")
-    return _interactive_exec(ctx, ["/bin/sh", "-c", _SHELL_PICK], cwd="/")
+    print(_shell_banner(args.name, bid, r.scope, _load_box_policy(r.data_dir), r.data_dir))
+    return _interactive_exec(ctx, ["/bin/sh", "-c", _SHELL_PICK], cwd=_box_cwd(r.scope))
 
 
 def _cmd_box_rm(args: argparse.Namespace) -> int:
@@ -462,7 +504,10 @@ def _cmd_claude(args: argparse.Namespace) -> int:
             _warn(f"project box {name!r} shadows a global box of the same name")
     policy = _policy_from_args(args, project)
     client = connect_or_spawn()
-    bid = client.create_box(r.data_dir, policy.to_dict(), name=name)["id"]
+    # Land the agent's MCP exec calls in the host CWD (it exists in the box via the repo
+    # mount) for a project box; root for a global one.
+    bid = client.create_box(r.data_dir, policy.to_dict(), name=name,
+                            cwd=_box_cwd(r.scope))["id"]
 
     info = read_info() or {}
     cfg = {"mcpServers": {"temenos": {

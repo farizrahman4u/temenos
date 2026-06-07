@@ -27,6 +27,7 @@ class Box:
         tenant: str | None = None,
         env: dict[str, str] | None = None,
         restore_from: str | None = None,
+        default_cwd: str | None = None,
     ) -> None:
         self.name = name
         self.policy = policy
@@ -34,6 +35,9 @@ class Box:
         self.audit = AuditLog()
         self._env = env
         self._restore_from = restore_from
+        # Default working dir for execs that don't pass one (used by the MCP tools so an
+        # agent's commands land in the project dir for a project box). None → backend's "/".
+        self.default_cwd = default_cwd
         self._opened = False
         # dirty-tracking for the checkpoint heuristic (D17): set on exec, cleared on checkpoint
         self._dirty = False
@@ -123,7 +127,8 @@ class Box:
     ) -> ExecResult:
         self._require_open()
         data = stdin.encode() if isinstance(stdin, str) else stdin
-        result = self._backend.exec(cmd, cwd=cwd, env=env, stdin=data, timeout=timeout)
+        result = self._backend.exec(cmd, cwd=cwd if cwd is not None else self.default_cwd,
+                                    env=env, stdin=data, timeout=timeout)
         now = time.monotonic()
         if not self._dirty:
             self._dirty_since = now

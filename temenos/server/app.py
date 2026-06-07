@@ -24,6 +24,7 @@ class CreateBox(BaseModel):
     policy: dict = {}
     name: str | None = None
     restore_from: str | None = None
+    cwd: str | None = None
 
 
 class ExecBody(BaseModel):
@@ -71,7 +72,7 @@ def create_app(manager: BoxManager | None = None, token: str | None = None) -> F
     @app.post("/v1/boxes", dependencies=[Depends(auth)])
     def create_box(body: CreateBox) -> dict:
         bid = manager.create(body.data_dir, Policy.from_dict(body.policy),
-                             name=body.name, restore_from=body.restore_from)
+                             name=body.name, restore_from=body.restore_from, cwd=body.cwd)
         return manager.info(bid)
 
     @app.get("/v1/boxes", dependencies=[Depends(auth)])

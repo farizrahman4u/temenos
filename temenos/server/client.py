@@ -65,10 +65,10 @@ class DaemonClient:
         return r.json()
 
     def create_box(self, data_dir: str, policy: dict, *, name: str | None = None,
-                   restore_from: str | None = None) -> dict:
+                   restore_from: str | None = None, cwd: str | None = None) -> dict:
         return self._json(self._c.post("/v1/boxes", json={
             "data_dir": data_dir, "policy": policy, "name": name,
-            "restore_from": restore_from}))
+            "restore_from": restore_from, "cwd": cwd}))
 
     def list_boxes(self) -> list[dict]:
         return self._json(self._c.get("/v1/boxes"))  # type: ignore[return-value]
