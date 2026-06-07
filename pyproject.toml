@@ -32,8 +32,9 @@ all = ["temenos[daemon]"]
 dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
 
 [project.urls]
-Homepage = "https://github.com/quilter-ai/temenos"
-Source = "https://github.com/quilter-ai/temenos"
+Homepage = "https://github.com/farizrahman4u/temenos"
+Source = "https://github.com/farizrahman4u/temenos"
+Issues = "https://github.com/farizrahman4u/temenos/issues"
 
 [project.scripts]
 temenos = "temenos.cli:main"                    # `temenos image …` works bare; rest need [all]
