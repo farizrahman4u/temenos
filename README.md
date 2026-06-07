@@ -2,8 +2,11 @@
 
 # temenos
 
-**Run a trusted AI agent on your host — and confine every command it executes to a gVisor sandbox.** 🏛️
+**A secure runtime for AI agents.** 🏛️
 
+*Your agent runs on the host — the code it executes runs in a gVisor box.*
+
+[![PyPI](https://img.shields.io/pypi/v/temenos.svg)](https://pypi.org/project/temenos/)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Built on gVisor + MCP](https://img.shields.io/badge/built%20on-gVisor%20%2B%20MCP-8a2be2.svg)](#-how-it-works)
@@ -114,10 +117,10 @@ wget https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}/runsc
 chmod +x runsc && sudo mv runsc /usr/local/bin/
 ```
 
-**2. temenos** (not yet on PyPI — install from source):
+**2. temenos**
 
 ```bash
-pip install "temenos[all] @ git+https://github.com/farizrahman4u/temenos.git"
+pip install "temenos[all]"        # daemon + MCP + CLI
 # or from a checkout:
 git clone https://github.com/farizrahman4u/temenos && cd temenos
 pip install -e ".[all,dev]"
