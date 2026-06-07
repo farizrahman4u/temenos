@@ -12,8 +12,8 @@ class TemenosError(Exception):
 
 class PolicyViolation(TemenosError):
     """A policy operation tried to widen a capability (e.g. ``Policy.restrict`` asked to
-    add a path/host, raise a limit, or raise the trust level). Escalation is an error,
-    not an operation."""
+    add a path, raise a limit, or enable network). Escalation is an error, not an
+    operation."""
 
 
 class BoxNotFound(TemenosError):

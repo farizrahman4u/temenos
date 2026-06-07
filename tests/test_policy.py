@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from temenos import Policy, PolicyViolation, TrustLevel
+from temenos import Policy, PolicyViolation
 
 
 # -- construction / defaults ----------------------------------------------------------
@@ -12,7 +12,6 @@ def test_default_policy_fs_locked_network_open():
     p = Policy()
     assert p.read == () and p.write == ()          # filesystem locked (overlay only)
     assert p.network is True                        # v1 default: host network passthrough
-    assert p.trust is TrustLevel.UNTRUSTED
     assert p.max_memory_mb == 256
 
 def test_lists_are_coerced_to_tuples_and_deduped():
@@ -35,33 +34,19 @@ def test_negative_limit_rejected():
     with pytest.raises(ValueError):
         Policy(max_memory_mb=-1)
 
-@pytest.mark.parametrize("value,expected", [
-    ("untrusted", TrustLevel.UNTRUSTED),
-    ("HOST", TrustLevel.HOST),
-    (2, TrustLevel.SANDBOXED),
-    (TrustLevel.RESTRICTED, TrustLevel.RESTRICTED),
-])
-def test_trust_coercion(value, expected):
-    assert Policy(trust=value).trust is expected
-
-def test_bad_trust_rejected():
-    with pytest.raises(ValueError):
-        Policy(trust="nonsense")
-    with pytest.raises(ValueError):
-        Policy(trust=True)          # bool must not sneak through as int
+def test_unknown_field_rejected():
+    with pytest.raises(TypeError):
+        Policy(trust="nonsense")    # type: ignore[call-arg]  — field removed in v1
 
 
 # -- restrict() -----------------------------------------------------------------------
 
 def test_restrict_narrows():
-    parent = Policy(read=["/a", "/b"], network=True, max_memory_mb=512,
-                    trust=TrustLevel.SANDBOXED)
-    child = parent.restrict(read=["/a"], network=False, max_memory_mb=128,
-                            trust=TrustLevel.UNTRUSTED)
+    parent = Policy(read=["/a", "/b"], network=True, max_memory_mb=512)
+    child = parent.restrict(read=["/a"], network=False, max_memory_mb=128)
     assert child.read == ("/a",)
     assert child.network is False
     assert child.max_memory_mb == 128
-    assert child.trust is TrustLevel.UNTRUSTED
 
 def test_restrict_inherits_unpassed_fields():
     parent = Policy(read=["/a"], write=["/w"], max_cpu_seconds=10)
@@ -78,11 +63,9 @@ def test_restrict_noargs_returns_equal_policy():
     {"network": True},                    # enable network (parent has none)
     {"max_memory_mb": 1024},              # raise a limit
     {"max_processes": 999},
-    {"trust": TrustLevel.HOST},           # raise trust
 ])
 def test_restrict_widening_raises(kwargs):
-    parent = Policy(read=["/a"], network=False, max_memory_mb=512,
-                    max_processes=16, trust=TrustLevel.SANDBOXED)
+    parent = Policy(read=["/a"], network=False, max_memory_mb=512, max_processes=16)
     with pytest.raises(PolicyViolation):
         parent.restrict(**kwargs)
 
@@ -115,16 +98,8 @@ def test_no_escalate_method():
 # -- from_dict / to_dict round trip ---------------------------------------------------
 
 def test_round_trip():
-    p = Policy(read=["/p"], write=["/w"], network=True,
-               max_memory_mb=384, trust=TrustLevel.RESTRICTED)
+    p = Policy(read=["/p"], write=["/w"], network=True, max_memory_mb=384)
     assert Policy.from_dict(p.to_dict()) == p
-
-def test_to_dict_serializes_trust_as_name():
-    assert Policy(trust=TrustLevel.HOST).to_dict()["trust"] == "HOST"
-
-def test_from_dict_accepts_trust_name_or_int():
-    assert Policy.from_dict({"trust": "sandboxed"}).trust is TrustLevel.SANDBOXED
-    assert Policy.from_dict({"trust": 1}).trust is TrustLevel.RESTRICTED
 
 def test_from_dict_rejects_unknown_key():
     with pytest.raises(ValueError):

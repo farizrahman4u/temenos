@@ -15,7 +15,7 @@ from .exceptions import (
 from .box import Box
 from .exceptions import StorageError
 from .image import Image, build_download, build_host_copy, build_minimal, list_images
-from .policy import Policy, TrustLevel
+from .policy import Policy
 from .result import AuditEntry, AuditLog, ExecResult, PolicyDecision
 from .storage import DiskVolume, MemoryVolume, Mount, StorageProvider
 
@@ -24,7 +24,6 @@ __version__ = "0.1.0"
 __all__ = [
     "Box",
     "Policy",
-    "TrustLevel",
     "Mount",
     "StorageProvider",
     "MemoryVolume",

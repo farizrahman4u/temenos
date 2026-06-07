@@ -15,7 +15,7 @@ If a name isn't found in the chosen scope you get a `no such box …` error (hin
 when a same-named global box exists) — local commands don't silently act on global boxes.
 
 > **`exec` flag placement.** `exec` slurps the command after the box name, so its own flags
-> (`--global`, `--cwd`, `--timeout`) must come **before** the box name:
+> (`--global`, `--cwd`, `--timeout`, `-it`) must come **before** the box name:
 > `temenos exec --global mybox -- ls`. Other commands accept `--global` anywhere.
 
 ## Commands
@@ -42,18 +42,24 @@ List boxes **on disk** (so stopped ones show too), annotated running/stopped fro
 
 Project boxes are marked with `*`.
 
-### `temenos exec [--global] [--cwd DIR] [--timeout S] NAME -- CMD…`
+### `temenos exec [--global] [-it] [--cwd DIR] [--timeout S] NAME -- CMD…`
 Run a command (argv, not a shell string) in a box and stream back stdout/stderr/exit code.
 The `--` is optional but recommended to separate the box command from temenos flags. Example:
 ```bash
 temenos exec api -- pytest -q
 temenos exec --global tools -- python3 --version
 ```
+Add `-it` (or `--interactive`/`--tty`, placed **before** the box name) to wire your terminal
+straight into the box over a PTY — for REPLs and full-screen TUIs like `python3`, `bash`, or
+`vim`. With `-it`, `--timeout` doesn't apply (the session runs until you exit). Without a
+controlling terminal (piped/redirected stdin), `-it` falls back to plain fd passthrough, so
+`echo … | temenos exec -it box -- python3` still works.
 
 ### `temenos shell [--global] NAME`
-A minimal REPL: each line runs as a fresh `sh -c` in the box. Filesystem changes persist; the
-working directory is tracked client-side. (No PTY — a true interactive terminal is post-v1;
-for an interactive *agent*, use `temenos claude`.)
+Open a **true interactive shell** in the box over a PTY (`bash` if the box has it, else `sh`).
+The box is persistent, so filesystem changes and the working directory survive across the
+session and across reconnects — run `python3`, `vim`, etc. just like a local shell. Needs a
+controlling terminal; for an interactive *agent* use `temenos claude`.
 
 ### `temenos rm [--global] [--keep-data] NAME`
 Stop the box and delete its data dir. `--keep-data` stops it but keeps the dir (checkpoint +

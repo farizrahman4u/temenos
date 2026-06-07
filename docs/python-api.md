@@ -31,7 +31,6 @@ default** in v1 — pass `network=False` to isolate.
 | `max_cpu_seconds` | `int` | `30` | CPU-time cap (`RLIMIT_CPU`) |
 | `max_processes` | `int` | `16` | process cap (`RLIMIT_NPROC`) |
 | `max_output_bytes` | `int` | `10 MiB` | exec output truncation threshold |
-| `trust` | `TrustLevel` | `UNTRUSTED` | policy-strictness band (`UNTRUSTED`/`RESTRICTED`/`SANDBOXED`/`HOST`) |
 
 Construction accepts lists (coerced to deduped tuples) and `network` as `bool` or
 `"host"`/`"none"`. A bare string for `read`/`write` is rejected (almost never intended).
@@ -42,9 +41,9 @@ Construction accepts lists (coerced to deduped tuples) and `network` as `bool` o
 child = policy.restrict(read=["/a"], network=False, max_memory_mb=128)
 ```
 - **`restrict(**changes) -> Policy`** — derive a child that is *no more capable*. Set fields
-  must be subsets, ints must be `<=`, trust `<=`, and `network` can only go `True→False`. Any
-  widening raises `PolicyViolation`. `mounts`/`image`/`scratch`/`checkpoint` are inherited.
-  There is **no** `escalate()`.
+  must be subsets, ints must be `<=`, and `network` can only go `True→False`. Any widening
+  raises `PolicyViolation`. `mounts`/`image`/`scratch`/`checkpoint` are inherited. There is
+  **no** `escalate()`.
 - **`to_dict()` / `from_dict(d)`** — round-trip plain data (used by REST/MCP/CLI/config). The
   box's `config.json` is exactly `to_dict()`.
 - **`allows_path_read(p)` / `allows_path_write(p)`** — semantic checks (write implies read).

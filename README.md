@@ -168,7 +168,8 @@ cd ~/code/my-repo
 
 temenos create                       # makes .temenos/default in this repo (+ .gitignore)
 temenos exec default -- python3 -c "print(6*7)"
-temenos shell default                # a minimal REPL inside the box
+temenos exec -it default -- python3  # interactive REPL (PTY); also vim, bash, etc.
+temenos shell default                # an interactive shell inside the box
 temenos ls                           # boxes the daemon is running
 temenos audit default                # what ran in the box
 temenos diff default                 # files under the box's write paths
@@ -265,8 +266,8 @@ in allow-all mode: the box is the enforcement, not the human.
 | `temenos serve [--port]` | run the per-user daemon (auto-spawned otherwise) |
 | `temenos create [NAME] [flags]` | create/ensure a box in this project |
 | `temenos ls` | list running boxes (project boxes marked) |
-| `temenos exec NAME -- CMD…` | run a command in a box |
-| `temenos shell NAME` | minimal REPL in a box |
+| `temenos exec [-it] NAME -- CMD…` | run a command in a box (`-it` = interactive PTY) |
+| `temenos shell NAME` | interactive shell in a box (PTY) |
 | `temenos rm NAME [--keep-data]` | stop + delete a box |
 | `temenos audit NAME` · `diff NAME` | audit log / write-set manifest |
 | `temenos claude [--box N] [flags] [-- claude-args]` | attach Claude with natives banned |
@@ -350,7 +351,8 @@ still shift before 1.0. Roadmap, ordered by where the value is:
    network instead of all-or-nothing (the biggest gap for adversarial fleets).
 3. **Per-tenant authz & quotas** — tenant-scoped tokens, aggregate caps + backpressure.
 4. **macOS (Seatbelt) backend** — see [`macos_plan.md`](https://github.com/farizrahman4u/temenos/blob/main/macos_plan.md).
-5. True diff-vs-original, an interactive PTY/attach, persisted audit logs.
+5. True diff-vs-original, a remote (over-the-daemon) attach, persisted audit logs.
+   *(Local interactive PTY shells already work — `temenos shell` / `temenos exec -it`.)*
 
 ## 🙏 Credits
 

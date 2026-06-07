@@ -14,38 +14,9 @@ from __future__ import annotations
 
 import posixpath
 from dataclasses import dataclass
-from enum import IntEnum
 
 from .exceptions import PolicyViolation
 from .storage import Mount
-
-
-class TrustLevel(IntEnum):
-    """How much we trust the *code* being run (not the agent). Higher = more capable.
-
-    In v1 the backend is always gVisor; TrustLevel gates *policy strictness*, and
-    ``HOST`` is the explicit no-sandbox escape hatch.
-    """
-
-    UNTRUSTED = 0   # tightest: no network, read-only root, tight limits (default)
-    RESTRICTED = 1  # explicit network allowlist permitted
-    SANDBOXED = 2   # looser limits / broader mounts
-    HOST = 3        # no sandbox — must be explicit
-
-
-def _coerce_trust(value: "TrustLevel | int | str") -> TrustLevel:
-    if isinstance(value, TrustLevel):
-        return value
-    if isinstance(value, bool):  # bool is an int subclass — reject to avoid surprises
-        raise ValueError(f"invalid trust level: {value!r}")
-    if isinstance(value, int):
-        return TrustLevel(value)
-    if isinstance(value, str):
-        try:
-            return TrustLevel[value.strip().upper()]
-        except KeyError:
-            raise ValueError(f"unknown trust level: {value!r}") from None
-    raise ValueError(f"invalid trust level: {value!r}")
 
 
 def _coerce_network(value: "bool | str") -> bool:
@@ -65,7 +36,7 @@ def _coerce_network(value: "bool | str") -> bool:
 
 _SET_FIELDS = ("read", "write")
 _INT_FIELDS = ("max_memory_mb", "max_cpu_seconds", "max_processes", "max_output_bytes")
-_ALL_FIELDS = _SET_FIELDS + _INT_FIELDS + ("trust", "network")
+_ALL_FIELDS = _SET_FIELDS + _INT_FIELDS + ("network",)
 
 
 @dataclass(frozen=True)
@@ -109,8 +80,6 @@ class Policy:
     max_processes: int = 16
     max_output_bytes: int = 10 * 1024 * 1024  # 10 MiB
 
-    trust: TrustLevel = TrustLevel.UNTRUSTED
-
     def __post_init__(self) -> None:
         # Ergonomic API: accept lists; store frozen tuples (deduped order-preserving).
         for f in _SET_FIELDS:
@@ -129,7 +98,6 @@ class Policy:
             raise ValueError(f"scratch must be 'disk' or 'memory', got {self.scratch!r}")
         if self.checkpoint not in ("auto", "on-close", "off"):
             raise ValueError(f"checkpoint must be 'auto'|'on-close'|'off', got {self.checkpoint!r}")
-        object.__setattr__(self, "trust", _coerce_trust(self.trust))
         for f in _INT_FIELDS:
             v = getattr(self, f)
             if not isinstance(v, int) or isinstance(v, bool) or v < 0:
@@ -142,7 +110,6 @@ class Policy:
 
         - set fields (read/write/network): each new value must be a **subset** of self's
         - int fields: each new value must be **<=** self's
-        - trust: must be **<=** self.trust
 
         Any widening raises ``PolicyViolation``. Fields not passed are inherited. There is
         no ``escalate()`` — widening is an error, not an operation.
@@ -170,18 +137,11 @@ class Policy:
                         f"restrict() cannot raise {field_name}: {iv} > {getattr(self, field_name)}"
                     )
                 merged[field_name] = iv
-            elif field_name == "network":
+            else:  # network
                 nb = _coerce_network(value)  # type: ignore[arg-type]
                 if nb and not self.network:
                     raise PolicyViolation("restrict() cannot enable network (parent has none)")
                 merged[field_name] = nb
-            else:  # trust
-                nt = _coerce_trust(value)  # type: ignore[arg-type]
-                if nt > self.trust:
-                    raise PolicyViolation(
-                        f"restrict() cannot raise trust: {nt.name} > {self.trust.name}"
-                    )
-                merged[field_name] = nt
         # mounts and image are inherited unchanged (restrict narrows simple capabilities;
         # provider volumes and the base image are not subset-narrowed — see plan).
         merged["mounts"] = self.mounts
@@ -204,8 +164,6 @@ class Policy:
         for f in _INT_FIELDS:
             if f in data:
                 kwargs[f] = int(data[f])  # type: ignore[call-overload]
-        if "trust" in data:
-            kwargs["trust"] = _coerce_trust(data["trust"])  # type: ignore[arg-type]
         if "network" in data:
             kwargs["network"] = _coerce_network(data["network"])  # type: ignore[arg-type]
         if "mounts" in data:
@@ -231,7 +189,6 @@ class Policy:
             "max_cpu_seconds": self.max_cpu_seconds,
             "max_processes": self.max_processes,
             "max_output_bytes": self.max_output_bytes,
-            "trust": self.trust.name,
         }
 
     # -- semantic checks (for validation/audit; gVisor mounts are the real enforcer) --

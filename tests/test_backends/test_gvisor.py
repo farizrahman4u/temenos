@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from temenos import Box, DiskVolume, MemoryVolume, Mount, Policy, TrustLevel
+from temenos import Box, DiskVolume, MemoryVolume, Mount, Policy
 from temenos.backends.gvisor import GVisorBackend
 from temenos.exceptions import BackendError
 

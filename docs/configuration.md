@@ -67,6 +67,7 @@ the per-box MCP data plane (agents) over the same `BoxManager`.
 | `GET /v1/boxes/{id}` | inspect |
 | `DELETE /v1/boxes/{id}` | destroy |
 | `POST /v1/boxes/{id}/exec` | run a command |
+| `GET /v1/boxes/{id}/attach` | argv + container id for a local interactive PTY `exec` (CLI, same-host) |
 | `GET /v1/boxes/{id}/audit` | audit log |
 | `GET /v1/boxes/{id}/writes` | write-set manifest |
 | `… /mcp/{id}` | per-box MCP data plane (see [Agents & MCP](agents.md)) |
