@@ -28,82 +28,21 @@ A shell that tries to `rm -rf ~`, read `~/.ssh/id_rsa`, or `curl evil.com` is co
 not because the model promised to behave, but because the sandbox boundary won't let it. The
 agent is trusted; the *code it runs* is not. 🛡️
 
-**That's one box. temenos is built to run a thousand.** The same engine that wraps a single
-agent on your laptop is a multi-box control plane — the point isn't sandboxing *one* helpful
-assistant, it's containment for when **human approval stops scaling** (see ["one box → a
-swarm → a platform"](#-one-box--a-swarm--a-platform) below).
+And because that boundary is *structural* — a banned tool, not a model on its best behavior —
+it holds the same whether you supervise one agent by hand or run a thousand in allow-all mode.
+Same box, any scale. [Scale it up](#-quickstart) when you need to.
 
 > *temenos* (τέμενος): a bounded precinct — a space set apart with a clear edge.
 
 ---
 
-## 🪜 One box → a swarm → a platform
-
-temenos reveals as much complexity as you bring to it. Same `Policy → Box` core at every
-rung; you just point more agents at more boxes.
-
-### Rung 1 — one box (start here)
-
-```bash
-temenos claude            # attach Claude to a box in this repo; natives banned
-```
-
-The approachable entry point: a single agent, your repo mounted live, a box underneath. Great
-for trying temenos, demos, and "let it run unattended on this branch overnight." This is the
-showcase — but it's the *first* rung, not the destination.
-
-### Rung 2 — a swarm (the point)
-
-When you fan a task across **dozens of agents in parallel**, approving each tool call by hand
-is a non-starter — so you run them in **allow-all ("yolo") mode**. That's exactly where
-containment-by-construction earns its keep: an agent can yolo all it wants because **there's
-nothing dangerous to allow** — every action it takes structurally lands in a policy'd box.
-
-```python
-from temenos import Policy
-from temenos.manager import BoxManager
-
-mgr = BoxManager()
-policy = Policy(network=False, write=["/scratch"])      # secure by default; opt into capability
-
-# one contained box per agent — the same boundary, fifty times over
-ids = [mgr.create(f"/srv/boxes/agent-{i}", policy, name=f"agent-{i}") for i in range(50)]
-
-for bid in ids:
-    box = mgr.get(bid)
-    box.write_file("/scratch/task.py", "...")
-    print(box.exec(["python3", "/scratch/task.py"]).stdout)   # ExecResult: stdout/exit/ms
-
-mgr.shutdown()    # checkpoints (if enabled) + tears down the whole fleet
-```
-
-gVisor is the density sweet spot a swarm needs: a VM per agent is too heavy, a plain container
-is a weaker boundary, a **box per agent is cheap *and* strong**. (Fan-out sugar — `mgr.map(...)`
-over N boxes — is on the [roadmap](#-status); the explicit loop above works today.)
-
-### Rung 3 — a platform (the ceiling)
-
-The same registry that runs your local swarm is the **multi-tenant control plane**. One
-per-user daemon supervises every box, exposes a REST control plane (the CLI) and a **per-box
-MCP data plane** (`/mcp/<box-id>`, scoped token) for the agents. A "tenant" and an "agent" are
-the same abstraction — so "run my swarm" and "run many customers' agents on untrusted code"
-are **the same build**, not two products.
-
-```bash
-temenos serve --port 8839     # the daemon: REST control + per-box MCP, supervising N boxes
-```
-
-Per-tenant authz and quotas are the platform-tier work in progress (see [Status](#-status));
-the box-per-owner isolation invariant — **no writable mount is ever shared across boxes** — is
-in place today.
-
 ## ✨ Highlights
 
 - 🏛️ **Agent on the host, execution in a box.** No broken updates, no API keys plumbed into a
   container, no re-auth. Only the code the agent *runs* is sandboxed.
-- 🐝 **Built for fleets, not just one helper.** One box or a thousand — the multi-box
-  `BoxManager` is the same code path whether it's your overnight swarm or a multi-tenant
-  platform. Allow-all is safe because containment is structural.
+- 🐝 **One box or a thousand.** The multi-box `BoxManager` is the same code path whether it's
+  one repo, your overnight swarm, or a multi-tenant platform. Allow-all stays safe because the
+  dangerous capability is *removed*, not merely discouraged.
 - 🔒 **Real isolation, not a syscall allowlist.** gVisor is a userspace kernel — the host
   filesystem is invisible beyond what policy mounts, network is off by default, and most
   kernel-CVE surface is intercepted before it reaches the host.
@@ -221,7 +160,7 @@ systemd-run:        yes             # required to ENFORCE memory/cpu limits (see
 
 ## 🚀 Quickstart
 
-### Rung 1 — the project flow (git-style, one box)
+### One box — your repo
 
 ```bash
 cd ~/code/my-repo
@@ -239,7 +178,7 @@ A bare box name resolves **project-first** (`.temenos/<name>`, walking up from C
 **global** (`~/.local/share/temenos/boxes/<name>`); a project box shadows a global one of the
 same name (with a warning).
 
-**Attach Claude Code to a box:**
+**Attach Claude Code:**
 
 ```bash
 temenos claude                       # box 'default' in this repo
@@ -251,32 +190,48 @@ temenos claude -- --model opus       # args after `--` go to claude
 The repo mounts **live-writable**, so the agent's edits land in your real files — the sandbox
 contains *execution*, not the trusted agent's edits. `--ephemeral` flips the repo to read-only.
 
-### Rung 2 — a swarm (the Python core)
+### Many boxes — a swarm
 
-The CLI and MCP server are thin layers over the same `Box`/`BoxManager` you can drive directly:
+Fan a task across dozens of agents and approving each tool call by hand is a non-starter, so
+you run them **allow-all**. The structural boundary is what makes that safe: an agent can yolo
+freely because there's nothing dangerous to allow — every action lands in a policy'd box. The
+CLI and MCP server are thin layers over the same `Box`/`BoxManager` you can drive directly:
 
 ```python
 from temenos import Box, Policy
 from temenos.manager import BoxManager
 
-# one box, directly
-with Box("demo", Policy(network=False, write=["/home/me/out"])) as box:
+# one box, directly — secure by default (no network, no host writes, tight limits)
+with Box("demo", Policy(write=["/home/me/out"])) as box:
     box.write_file("/home/me/out/run.py", "print(6 * 7)\n")
-    r = box.exec(["python3", "/home/me/out/run.py"])
-    print(r.stdout, r.exit_code)        # "42\n", 0
-    box.exec(["cat", "/etc/shadow"]).ok # -> False  (host invisible)
+    print(box.exec(["python3", "/home/me/out/run.py"]).stdout)   # "42\n"
+    box.exec(["cat", "/etc/shadow"]).ok                          # -> False (host invisible)
 
-# a fleet, via the registry the daemon owns
+# a fleet — one contained box per agent, via the registry the daemon owns
 mgr = BoxManager()
 ids = [mgr.create(f"/srv/boxes/agent-{i}", Policy()) for i in range(50)]
 for bid in ids:
     print(mgr.get(bid).exec(["echo", "hi"]).stdout.strip())
-mgr.shutdown()
+mgr.shutdown()    # checkpoints (where enabled) + tears down the whole fleet
 ```
 
-`Policy` is frozen and **secure by default** (`Policy()` = no network, no host writes, tight
-limits). `restrict()` derives child policies that can only *narrow* — widening raises
-`PolicyViolation`. A runnable version is in [`examples/python_api.py`](https://github.com/farizrahman4u/temenos/blob/main/examples/python_api.py).
+`Policy` is frozen; `restrict()` derives child policies that can only *narrow* (widening raises
+`PolicyViolation`). gVisor is the density that makes a per-agent box cheap — a VM each is too
+heavy, a plain container a weaker boundary. (`mgr.map(...)` fan-out sugar is on the
+[roadmap](#-status); the loop above works today.) Runnable:
+[`examples/python_api.py`](https://github.com/farizrahman4u/temenos/blob/main/examples/python_api.py).
+
+### A fleet under one daemon
+
+```bash
+temenos serve --port 8839     # REST control + per-box MCP (/mcp/<box-id>), supervising every box
+```
+
+`BoxManager` is also the multi-tenant control plane — a "tenant" and an "agent" are the same
+abstraction, so "run my swarm" and "run many customers' agents on untrusted code" are the same
+code, not two products. The isolation invariant — **no writable mount is ever shared across
+boxes** — holds today; tenant-scoped tokens and aggregate quotas are the platform-tier
+[roadmap](#-status).
 
 ## 🧠 The one design decision
 
