@@ -42,6 +42,17 @@ temenos = "temenos.cli:main"                    # `temenos image …` works bare
 [tool.hatch.build.targets.wheel]
 packages = ["temenos"]
 
+[tool.hatch.build.targets.sdist]
+# Ship the package, tests, examples, license and the design doc — but not local harness
+# settings or internal/candid planning docs.
+exclude = [
+    ".claude",
+    "evaluation.md",
+    "macos_plan.md",
+    ".coverage",
+    "scripts",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
