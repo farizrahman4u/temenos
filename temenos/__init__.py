@@ -12,12 +12,14 @@ from .exceptions import (
     QuotaExceeded,
     TemenosError,
 )
+from .box import Box
 from .policy import Policy, TrustLevel
 from .result import AuditEntry, AuditLog, ExecResult, PolicyDecision
 
 __version__ = "0.1.0"
 
 __all__ = [
+    "Box",
     "Policy",
     "TrustLevel",
     "ExecResult",

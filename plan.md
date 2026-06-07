@@ -232,9 +232,11 @@ box = await mgr.create(                     # -> Box
     policy=Policy(read=["/project"], write=["/work"], trust=TrustLevel.UNTRUSTED),
 )
 
-r = await box.exec(["echo", "hi"])          # -> ExecResult(stdout, stderr, exit_code, truncated, ms)
-await box.write_file("/work/a.py", "print(6*7)\n")        # lands in the CoW overlay
-src = await box.read_file("/work/a.py")
+r = box.exec(["echo", "hi"])                # -> ExecResult(stdout, stderr, exit_code, truncated, ms)
+box.write_file("/tmp/a.py", "print(6*7)\n") # /tmp = always-present scratch (tmpfs)
+src = box.read_file("/tmp/a.py")
+# policy.write/read paths must be EXISTING host dirs; writes there are CoW (overlay),
+# so the host is never modified — inspect box.writes() and commit deliberately.
 async for ev in box.exec_stream(["python3","/work/a.py"], tty=True):  # for -it / shell
     ...
 writeset = box.writes()                     # {path: bytes} from the overlay upper layer
@@ -512,9 +514,13 @@ that mode.
   `Policy` (restrict/from_dict/to_dict/allows_*), `TrustLevel`, `ExecResult`,
   `AuditEntry`/`AuditLog`, exception hierarchy. 37 tests green (`tests/test_policy.py`,
   `tests/test_result.py`). Package scaffold (`pyproject.toml`, `temenos/`) in place.
-- **Phase 2 — gVisor backend + `Box`** (single box, one tenant): port the spike's
-  run/exec/teardown into `backends/gvisor.py`+`oci.py`; `Box.exec/read/write/writes`.
-  Test: write-then-run `42`; a second box can't see the first's `/tmp`.
+- **Phase 2 — gVisor backend + `Box`. ✅ DONE.** `backends/base.py` (ABC),
+  `backends/oci.py` (bundle from Policy), `backends/gvisor.py` (platform auto-detect,
+  held-run + exec, `--overlay2=all:memory` so writes never touch the host, per-box
+  systemd memory scope), `box.py` (`exec`/`read_file`/`write_file`/`list_dir`/`writes`,
+  audit, context manager). 11 integration tests green (`tests/test_backends/`): write-then-
+  run `42`, two-box isolation, host-untouched ephemerality, clear errors for v1 network /
+  missing-path. Bind sources must be existing host paths; `/tmp` is the scratch tmpfs.
 - **Phase 3 — CLI (local, no auth):** `create`/`ls`/`exec`/`shell`/`rm`/`audit`/`diff`
   against an in-process `BoxManager`; `temenos doctor`.
 - **Phase 4 — FastAPI daemon + `BoxManager`:** REST endpoints + token auth +
