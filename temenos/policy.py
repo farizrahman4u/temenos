@@ -45,9 +45,24 @@ def _coerce_trust(value: "TrustLevel | int | str") -> TrustLevel:
     raise ValueError(f"invalid trust level: {value!r}")
 
 
-_SET_FIELDS = ("read", "write", "network")
+def _coerce_network(value: "bool | str") -> bool:
+    """v1 network is a simple toggle: off (False/'none') or full passthrough
+    (True/'host'). No firewalling — filtered allowlists are post-v1."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in ("host", "on", "true", "yes"):
+            return True
+        if s in ("none", "off", "false", "no", ""):
+            return False
+        raise ValueError(f"invalid network mode: {value!r} (use bool or 'host'/'none')")
+    raise ValueError(f"network must be bool or 'host'/'none', got {type(value).__name__}")
+
+
+_SET_FIELDS = ("read", "write")
 _INT_FIELDS = ("max_memory_mb", "max_cpu_seconds", "max_processes", "max_output_bytes")
-_ALL_FIELDS = _SET_FIELDS + _INT_FIELDS + ("trust",)
+_ALL_FIELDS = _SET_FIELDS + _INT_FIELDS + ("trust", "network")
 
 
 @dataclass(frozen=True)
@@ -62,9 +77,16 @@ class Policy:
     # Explicit provider-backed volumes (memory / disk / fsspec / custom) at chosen paths.
     mounts: tuple[Mount, ...] = ()
 
-    # Network — default deny. Entries are "host" or "host:port". (v1: non-empty network
-    # requires the post-v1 egress filter; an empty tuple = no network.)
-    network: tuple[str, ...] = ()
+    # Network — simple toggle (v1): False = no network (isolated netns), True = full
+    # host passthrough (no firewalling). Filtered allowlists are post-v1.
+    # ⚠️ network=True gives the box full host network reach (localhost, LAN, cloud
+    # metadata, arbitrary egress) — operator opt-in only; unsafe for adversarial tenants.
+    network: bool = False
+
+    # Box base image (a runner-owned rootfs under $TEMENOS_DATA/images/<name>). None =
+    # default host-`/usr`-bind base (read-only system). An image gives a writable system
+    # (pip/apt/npm) — see image.py.
+    image: str | None = None
 
     # Resource limits (enforced per-box via the systemd scope; see plan §9/D6).
     max_memory_mb: int = 256
@@ -85,6 +107,9 @@ class Policy:
         for m in self.mounts:
             if not isinstance(m, Mount):
                 raise TypeError(f"mounts must contain Mount instances, got {type(m).__name__}")
+        object.__setattr__(self, "network", _coerce_network(self.network))
+        if self.image is not None and not isinstance(self.image, str):
+            raise TypeError(f"image must be a str name or None, got {type(self.image).__name__}")
         object.__setattr__(self, "trust", _coerce_trust(self.trust))
         for f in _INT_FIELDS:
             v = getattr(self, f)
@@ -126,6 +151,11 @@ class Policy:
                         f"restrict() cannot raise {field_name}: {iv} > {getattr(self, field_name)}"
                     )
                 merged[field_name] = iv
+            elif field_name == "network":
+                nb = _coerce_network(value)  # type: ignore[arg-type]
+                if nb and not self.network:
+                    raise PolicyViolation("restrict() cannot enable network (parent has none)")
+                merged[field_name] = nb
             else:  # trust
                 nt = _coerce_trust(value)  # type: ignore[arg-type]
                 if nt > self.trust:
@@ -133,16 +163,17 @@ class Policy:
                         f"restrict() cannot raise trust: {nt.name} > {self.trust.name}"
                     )
                 merged[field_name] = nt
-        # mounts are inherited unchanged (v1: restrict narrows the simple capabilities;
-        # provider-backed volumes are not subset-narrowed — see plan).
+        # mounts and image are inherited unchanged (restrict narrows simple capabilities;
+        # provider volumes and the base image are not subset-narrowed — see plan).
         merged["mounts"] = self.mounts
+        merged["image"] = self.image
         return Policy(**merged)  # type: ignore[arg-type]
 
     # -- plain-data round trip (shared by REST/MCP/CLI/config) -----------------------
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> "Policy":
-        unknown = set(data) - set(_ALL_FIELDS) - {"mounts"}
+        unknown = set(data) - set(_ALL_FIELDS) - {"mounts", "image"}
         if unknown:
             raise ValueError(f"unknown policy field(s): {sorted(unknown)}")
         kwargs: dict[str, object] = {}
@@ -154,16 +185,21 @@ class Policy:
                 kwargs[f] = int(data[f])  # type: ignore[call-overload]
         if "trust" in data:
             kwargs["trust"] = _coerce_trust(data["trust"])  # type: ignore[arg-type]
+        if "network" in data:
+            kwargs["network"] = _coerce_network(data["network"])  # type: ignore[arg-type]
         if "mounts" in data:
             kwargs["mounts"] = tuple(Mount.from_dict(m) for m in data["mounts"])  # type: ignore[union-attr]
+        if "image" in data:
+            kwargs["image"] = data["image"]
         return cls(**kwargs)  # type: ignore[arg-type]
 
     def to_dict(self) -> dict[str, object]:
         return {
             "read": list(self.read),
             "write": list(self.write),
-            "network": list(self.network),
+            "network": self.network,
             "mounts": [m.to_dict() for m in self.mounts],
+            "image": self.image,
             "max_memory_mb": self.max_memory_mb,
             "max_cpu_seconds": self.max_cpu_seconds,
             "max_processes": self.max_processes,
@@ -179,19 +215,6 @@ class Policy:
 
     def allows_path_write(self, path: str) -> bool:
         return self._under_any(path, self.write)
-
-    def allows_host(self, host: str, port: int | None = None) -> bool:
-        for entry in self.network:
-            ehost, sep, eport = entry.partition(":")
-            if ehost != host:
-                continue
-            if not sep:               # bare host -> any port
-                return True
-            if port is None:          # asking about the host in general
-                return True
-            if str(port) == eport:
-                return True
-        return False
 
     @staticmethod
     def _under_any(path: str, bases: tuple[str, ...]) -> bool:

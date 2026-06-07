@@ -112,7 +112,16 @@ def test_exit_code_propagates():
         assert box.exec(["sh", "-c", "exit 7"]).exit_code == 7
 
 
-def test_network_policy_rejected_in_v1():
-    box = Box("t-net", Policy(network=["example.com"], trust=TrustLevel.RESTRICTED))
-    with pytest.raises(BackendError, match="network"):
-        box.start()
+def _ifaces(box):
+    r = box.exec(["sh", "-c", "awk -F: 'NR>2{print $1}' /proc/net/dev | tr -d ' '"])
+    return {ln for ln in r.stdout.split() if ln}
+
+
+def test_network_off_is_isolated():
+    with _box("t-net-off") as box:                 # network defaults False
+        assert _ifaces(box) == {"lo"}              # only loopback, no egress path
+
+
+def test_network_host_passthrough_exposes_host_ifaces():
+    with Box("t-net-host", Policy(network=True)) as box:
+        assert _ifaces(box) - {"lo"}               # host interfaces (eth0, …) present

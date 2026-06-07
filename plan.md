@@ -109,6 +109,7 @@ temenos/                         # (v1) built in v1 · (post) specified, deferre
 │   ├── manager.py           # (v1) BoxManager: multi-tenant registry, CRUD, quotas, TTL
 │   ├── result.py            # (v1) ExecResult, AuditEntry, AuditLog (pure)
 │   ├── storage.py           # (v1) StorageProvider + MemoryVolume/DiskVolume + Mount (D12)
+│   ├── image.py             # (v1) box images: runner-owned base rootfs (writable /usr)
 │   ├── exceptions.py        # (v1) PolicyViolation, BoxNotFound, QuotaExceeded, Backend/StorageError
 │   │
 │   ├── backends/
@@ -159,7 +160,7 @@ Phase 0 spike.
 |---|---|---|---|
 | D1 | Python deps | **Pragmatic, vetted.** Core lib zero runtime deps; surfaces pull extras. `runsc` is a *binary* dep, not pip. | Avoid reinventing MCP/HTTP/CLI plumbing. |
 | D2 | v1 backend | **gVisor (`runsc`) ONLY.** Native/macOS/Windows deferred. | Spike-driven: gVisor provides ns+seccomp+rootfs+netns internally → v1 skips the riskiest hand-rolled code and ships the *strongest* isolation. Trade-off: hard `runsc` dep. |
-| D3 | Networking | v1: **empty netns** (`runsc --network=none`, verified). Per-host filtering (pasta + SNI/Host proxy) is **post-v1**. | `--network=none` is free, robust, the secure default. |
+| D3 | Networking | **Simple toggle** (`Policy.network: bool`, verified): `False` → `--network=none` + isolated netns (default); `True` → `--network=host` + **drop the netns** = full passthrough, **no firewalling** (both flag and netns-drop required). Per-host filtering (pasta+SNI proxy) is **post-v1**. | No firewalling wanted — off or passthrough. ⚠️ `network=True` = full host reach (localhost/LAN/cloud-metadata/arbitrary egress): operator opt-in, unsafe for adversarial tenants; agents never set policy. |
 | D4 | Surfaces | **Core lib → FastAPI daemon (REST + MCP) + thin CLI.** One core, multiple adapters. | §7 layering. |
 | D5 | seccomp | **gVisor's built-in interception.** Hand-rolled cBPF is post-v1 (native only). | gVisor's filtering is stronger and already written. |
 | D6 | Resource limits | **Per-box `systemd-run --user --scope`** with `MemoryMax`/`MemorySwapMax=0`/`CPUQuota`/`TasksMax` from `Policy` (spike-verified: enforces, unprivileged, works from any cgroup). Direct delegated child cgroup is an optimization when the daemon runs inside `user@.service`. Fallback if no systemd user-delegation: warn + unenforced. | gVisor has no internal cap; cgroups are the only lever, and the user manager makes them unprivileged-per-box. |
@@ -205,9 +206,34 @@ system-installed packages (ro) + whatever is mounted in**.
 - **Custom deps in v1:** pre-build a venv / site-packages / node_modules / wheelhouse on
   the host (or a DiskVolume), mount it (`Mount("/deps", DiskVolume(...), "ro")`), and set
   `PYTHONPATH`/`NODE_PATH`/`PATH`. No network needed.
-- **Post-v1:** filtered network → live `pip`/`npm` into a writable volume; **box images
-  (`--image`)** → a prepared base rootfs instead of host `/usr`, for chosen runtime
-  *versions* + baked deps (today every box inherits the host's system Python 3.12).
+- **Network (v1):** simple toggle (D3). `network=False` → no egress (only `lo`).
+  `network=True` → full host passthrough (box reaches the internet; verified). With
+  passthrough, `pip`/`npm` *would* work — but `/usr` is still read-only, so install to a
+  venv/`--user`/volume, not the system.
+- **Writable `/usr` → box images (BUILT).** The host `/usr` bind can't be made writable
+  in a rootless box: host-root-owned files map to `nobody` (65534) so box-root can't
+  write them — it's **uid mapping, not overlay** (verified: `/usr` shows owner 65534).
+  The fix is a **runner-owned image** (`temenos/image.py`, `Policy.image=<name>`): the box
+  root is a rootfs *owned by the box-runner*, so `--overlay2=root:memory` makes the whole
+  root — `/usr`,`/etc`,`/var` — **writable-ephemeral**, while disk volumes stay durable.
+  The image is the shared lower (built once); each box gets its own memory upper → no
+  per-box copy. Builders: `build_minimal` (thin, ldd-resolved) and `build_host_snapshot`
+  (full host copy); `mmdebstrap`/`skopeo` later. **Verified**: an image box writes
+  `/usr/lib/...`, host image untouched. Needed for `apt`/system-`pip` (+ `network=True`). This also
+  gives runtime *version* choice (today every box inherits the host's system Python 3.12).
+- **`/usr` writes are ephemeral and NOT host-persisted.** The root overlay upper is
+  *ephemeral*, but its **medium is a knob** (verified): `root:memory` backs it in RAM
+  (counts against `MemoryMax` — a 400 MB write in a 256 MB box OOMs); `root:dir=<scratch
+  disk>` backs it on disk (same 400 MB write succeeds) → ephemeral writes can exceed the
+  RAM limit. `dir=` is NOT persistence — gVisor allocates the backing anonymously
+  (unlinked; the dir looks empty) and discards it on teardown. So expose a scratch-medium
+  choice (default `memory`; `dir=` for write-heavy boxes), and keep persistence separate.
+- **Persisting writes is deliberate and separate:** (a) **mount a `DiskVolume`** at the
+  path you want durable; (b) **gVisor `fscheckpoint` + `-fs-restore-image-path`** —
+  **verified** to save/restore the box filesystem **when the overlay is disk-backed**
+  (`root:self` or `root:dir=`, NOT `memory`); gVisor-experimental but works rootless. So
+  checkpointable boxes opt into a disk-backed overlay medium; (c) **commit-to-image** to
+  bake the modified root into a new reusable image.
 
 ---
 
@@ -422,8 +448,10 @@ path is the box's MCP tools, every host-touching native tool banned:
 
 ## 9. gVisor backend contract (verified)
 
-Global flags: `--root=<per-box state dir> --rootless --network=none --ignore-cgroups
---platform=<auto-detected>`. **Platform is auto-detected, not hardcoded** — it's a
+Global flags: `--root=<per-box state dir> --rootless --network=<none|host>
+--ignore-cgroups --overlay2=root:memory --platform=<auto-detected>`. Network: `none`
+(default, with the netns kept) or `host` (passthrough, with the netns **dropped** from
+the OCI spec — both required, D3). **Platform is auto-detected, not hardcoded** — it's a
 performance/compatibility choice; the security model (the gVisor sentry) is identical
 across platforms. Preference order, each validated by a probe run: **`kvm`** (fastest,
 needs `/dev/kvm`) → **`systrap`** (gVisor's modern default, no KVM needed) → **`ptrace`**
@@ -517,7 +545,9 @@ All rows assume the §2 threat model. v1 = gVisor only; others are roadmap.
 | Side channels (co-resident) | out of scope | out of scope | out of scope |
 | Requires root | no (rootless) | no | no |
 
-\* v1 `--network=none` is genuinely blocked; per-host *filtered* egress is post-v1, with
+\* v1 network is a toggle (D3): `network=False` (`--network=none`) is genuinely blocked;
+`network=True` (`--network=host`) is **full passthrough — no isolation** (operator
+opt-in, unsafe for adversarial tenants). Per-host *filtered* egress is post-v1, with
 a residual gap (forged-SNI-to-allowed-IP / hostile protocols). † gVisor container
 boundary + BoxManager authz/quotas; side channels not addressed.
 
@@ -544,10 +574,16 @@ that mode.
   per-box systemd memory scope, provider prepare/commit/cleanup), `storage.py`
   (`StorageProvider` + `MemoryVolume`/`DiskVolume` + `Mount`, D12), `box.py`
   (`exec`/`read_file`/`write_file`/`list_dir`/`writes`/`commit`, audit, context manager).
-  **63 tests green** total: write-then-run `42`, two-box isolation, disk-durable vs
-  memory-ephemeral, root-ephemeral, disk containment (`allowed_root`), provider
-  round-trip, clear errors for v1 network / missing read path. `read`/`write` paths are
-  existing host dirs (write auto-created); `/tmp` is the scratch tmpfs.
+  plus a **network toggle** (`Policy.network: bool` → `--network=none|host` + netns
+  drop, verified passthrough). **66 tests green** total: write-then-run `42`, two-box
+  isolation, disk-durable vs memory-ephemeral, root-ephemeral, disk containment
+  (`allowed_root`), provider round-trip, network off (only `lo`) vs host (eth0 present),
+  missing-read-path error. `read`/`write` paths are existing host dirs (write
+  auto-created); `/tmp` is the scratch tmpfs. **Plus box images** (`image.py`,
+  `Policy.image`): runner-owned base rootfs → writable `/usr`/`/etc` (verified), the
+  unblock for `apt`/system-`pip`. **72 tests green.** (Persistence: gVisor `fscheckpoint`
+  + `-fs-restore-image-path` verified with a disk-backed overlay — checkpointable boxes
+  opt into `root:self`/`root:dir`.)
 - **Phase 3 — CLI (local, no auth):** `create`/`ls`/`exec`/`shell`/`rm`/`audit`/`diff`
   against an in-process `BoxManager`; `temenos doctor`.
 - **Phase 4 — FastAPI daemon + `BoxManager`:** REST endpoints + token auth +
@@ -604,6 +640,9 @@ it. So:
 - **Direct delegated child cgroups** (D6 optimization) — when the daemon runs inside
   `user@.service`, create child cgroups directly instead of one `systemd-run` scope per
   box, avoiding the per-box dbus round-trip. v1 already enforces via `systemd-run`.
+- **Commit-to-image** (`docker commit` analog) — snapshot a box's merged root into a new
+  image dir for reuse; the way to persist `/usr`-level system changes (the overlay upper
+  isn't user-persistable — verified).
 - **Box persistence across daemon restarts** — gVisor `checkpoint`/`restore`.
 - **macOS Seatbelt / Windows Job Objects backends.** v1 `BoxManager` raises
   "platform not yet supported" off-Linux.

@@ -83,15 +83,19 @@ class GVisorBackend(Backend):
 
     # -- flag construction ------------------------------------------------------------
 
+    def _net_mode(self) -> str:
+        # v1 simple toggle: full passthrough (host) or isolated (none). No filtering.
+        return "host" if (self._policy and self._policy.network) else "none"
+
     def _run_globals(self, platform: str) -> list[str]:
         # root:memory => root/system writes are ephemeral RAM (host untouched); volume
         # mounts (disk binds, tmpfs) keep their own semantics (disk = durable).
-        return [self._runsc, f"--root={self._state}", "--rootless", "--network=none",
+        return [self._runsc, f"--root={self._state}", "--rootless", f"--network={self._net_mode()}",
                 "--ignore-cgroups", "--overlay2=root:memory", f"--platform={platform}"]
 
     def _ctl_globals(self) -> list[str]:
         # exec/state/kill/delete join the running sandbox; no --overlay2 needed.
-        return [self._runsc, f"--root={self._state}", "--rootless", "--network=none",
+        return [self._runsc, f"--root={self._state}", "--rootless", f"--network={self._net_mode()}",
                 "--ignore-cgroups", f"--platform={self._platform_cache}"]
 
     @staticmethod
@@ -117,10 +121,10 @@ class GVisorBackend(Backend):
         if self._held is not None:
             raise BackendError("backend already open")
         if policy.network:
-            raise BackendError(
-                "network policy requires post-v1 egress filtering; v1 supports only an "
-                "empty network (no egress). Got: " + ", ".join(policy.network)
-            )
+            log.warning("box %s: network=host (full passthrough, NO firewalling) — the "
+                        "box can reach localhost, the LAN, cloud metadata, and exfiltrate "
+                        "anywhere. Operator opt-in only; unsafe for adversarial tenants.",
+                        name)
         # read paths must already exist (host data we expose). write paths are durable
         # disk binds — created if missing (the box's output dir). Box-internal scratch
         # should use the always-present /tmp or a MemoryVolume.
@@ -141,10 +145,15 @@ class GVisorBackend(Backend):
         self._cid = name or f"temenos-{uuid.uuid4().hex[:12]}"
         self._state = tempfile.mkdtemp(prefix="temenos-state-")
         self._bundle = tempfile.mkdtemp(prefix="temenos-bundle-")
+        # resolve a box image (runner-owned writable rootfs) if the policy names one
+        image_rootfs = None
+        if policy.image:
+            from ..image import resolve
+            image_rootfs = resolve(policy.image).rootfs
         # let each storage provider set up its backing (mkdir, download, …) before start
         for m in policy.mounts:
             m.provider.prepare(self._cid)
-        oci.build_bundle(policy, self._bundle, env=env)
+        oci.build_bundle(policy, self._bundle, env=env, image_rootfs=image_rootfs)
 
         run_cmd = (self._scope_prefix(policy)
                    + self._run_globals(platform)

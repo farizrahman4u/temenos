@@ -35,7 +35,7 @@ def build_rootfs(bundle_dir: str) -> str:
     return rootfs
 
 
-def _mounts(policy: Policy) -> list[dict]:
+def _mounts(policy: Policy, *, host_system: bool) -> list[dict]:
     mounts: list[dict] = [
         {"destination": "/proc", "type": "proc", "source": "proc"},
         {"destination": "/tmp", "type": "tmpfs", "source": "tmpfs",
@@ -43,16 +43,19 @@ def _mounts(policy: Policy) -> list[dict]:
         {"destination": "/dev", "type": "tmpfs", "source": "tmpfs",
          "options": ["nosuid", "mode=0755"]},
     ]
-    for name in _ROOT_BINDS:
-        src = "/" + name
-        if os.path.isdir(src):
-            mounts.append({"destination": src, "source": src, "type": "bind",
-                           "options": ["rbind", "ro"]})
-    for name in _USRMERGE:  # bind only the ones that are real dirs, not usrmerge symlinks
-        src = "/" + name
-        if os.path.isdir(src) and not os.path.islink(src):
-            mounts.append({"destination": src, "source": src, "type": "bind",
-                           "options": ["rbind", "ro"]})
+    # host-bind base only: expose the host's read-only /usr,/etc (+ real bin/sbin/lib).
+    # In image mode the image rootfs already provides these (writable), so skip them.
+    if host_system:
+        for name in _ROOT_BINDS:
+            src = "/" + name
+            if os.path.isdir(src):
+                mounts.append({"destination": src, "source": src, "type": "bind",
+                               "options": ["rbind", "ro"]})
+        for name in _USRMERGE:  # only real dirs, not usrmerge symlinks
+            src = "/" + name
+            if os.path.isdir(src) and not os.path.islink(src):
+                mounts.append({"destination": src, "source": src, "type": "bind",
+                               "options": ["rbind", "ro"]})
     # read/write sugar: same-path disk binds (read = ro, write = durable rw to host).
     for path in policy.read:
         mounts.append({"destination": path, "source": path, "type": "bind",
@@ -81,7 +84,8 @@ def _rlimits(policy: Policy) -> list[dict]:
     ]
 
 
-def make_config(policy: Policy, init_cmd: list[str], env: dict[str, str] | None) -> dict:
+def make_config(policy: Policy, init_cmd: list[str], env: dict[str, str] | None,
+                *, root_path: str, host_system: bool) -> dict:
     return {
         "ociVersion": "1.0.0",
         "process": {
@@ -95,12 +99,18 @@ def make_config(policy: Policy, init_cmd: list[str], env: dict[str, str] | None)
             "rlimits": _rlimits(policy),
         },
         # writable root so tooling (pip/npm/builds) works; --overlay2=root:memory keeps
-        # those writes ephemeral in RAM and off the host bundle (verified).
-        "root": {"path": "rootfs", "readonly": False},
+        # those writes ephemeral in RAM and off the host (verified). In image mode the
+        # root is the runner-owned image rootfs (so /usr,/etc are writable too).
+        "root": {"path": root_path, "readonly": False},
         "hostname": "temenos",
-        "mounts": _mounts(policy),
+        "mounts": _mounts(policy, host_system=host_system),
         "linux": {
-            "namespaces": [{"type": t} for t in ("pid", "mount", "ipc", "uts", "network")],
+            # Drop the network namespace for passthrough (network=True) so the box shares
+            # the host netns; keep it (isolated, empty) for network=False. Pairs with the
+            # backend's --network=host|none (both are required — verified).
+            "namespaces": [{"type": t} for t in
+                           (("pid", "mount", "ipc", "uts") if policy.network
+                            else ("pid", "mount", "ipc", "uts", "network"))],
             # Harmless under rootless --ignore-cgroups; real enforcement is the systemd
             # scope the backend wraps the box in (D6).
             "resources": {"memory": {"limit": policy.max_memory_mb * 1024 * 1024}},
@@ -114,9 +124,20 @@ def build_bundle(
     *,
     init_cmd: tuple[str, ...] = ("/bin/sleep", "infinity"),
     env: dict[str, str] | None = None,
+    image_rootfs: str | None = None,
 ) -> None:
-    """Write rootfs/ + config.json into `bundle_dir`."""
-    build_rootfs(bundle_dir)
-    cfg = make_config(policy, list(init_cmd), env)
+    """Write config.json (and, for the host-bind base, rootfs/) into `bundle_dir`.
+
+    image_rootfs set -> image mode: root is the runner-owned image rootfs (writable
+    /usr,/etc); no host system binds. Otherwise -> host-bind base: a scaffold rootfs in
+    the bundle + read-only host /usr,/etc.
+    """
+    if image_rootfs:
+        cfg = make_config(policy, list(init_cmd), env,
+                          root_path=os.path.abspath(image_rootfs), host_system=False)
+    else:
+        build_rootfs(bundle_dir)
+        cfg = make_config(policy, list(init_cmd), env,
+                          root_path="rootfs", host_system=True)
     with open(os.path.join(bundle_dir, "config.json"), "w") as f:
         json.dump(cfg, f, indent=2)

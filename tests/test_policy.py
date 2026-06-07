@@ -10,7 +10,7 @@ from temenos import Policy, PolicyViolation, TrustLevel
 
 def test_default_policy_is_locked_down():
     p = Policy()
-    assert p.read == () and p.write == () and p.network == ()
+    assert p.read == () and p.write == () and p.network is False
     assert p.trust is TrustLevel.UNTRUSTED
     assert p.max_memory_mb == 256
 
@@ -53,12 +53,12 @@ def test_bad_trust_rejected():
 # -- restrict() -----------------------------------------------------------------------
 
 def test_restrict_narrows():
-    parent = Policy(read=["/a", "/b"], network=["api.x:443"], max_memory_mb=512,
+    parent = Policy(read=["/a", "/b"], network=True, max_memory_mb=512,
                     trust=TrustLevel.SANDBOXED)
-    child = parent.restrict(read=["/a"], network=[], max_memory_mb=128,
+    child = parent.restrict(read=["/a"], network=False, max_memory_mb=128,
                             trust=TrustLevel.UNTRUSTED)
     assert child.read == ("/a",)
-    assert child.network == ()
+    assert child.network is False
     assert child.max_memory_mb == 128
     assert child.trust is TrustLevel.UNTRUSTED
 
@@ -74,16 +74,33 @@ def test_restrict_noargs_returns_equal_policy():
 
 @pytest.mark.parametrize("kwargs", [
     {"read": ["/a", "/c"]},               # add a path not in parent
-    {"network": ["evil.com"]},            # add a host
+    {"network": True},                    # enable network (parent has none)
     {"max_memory_mb": 1024},              # raise a limit
     {"max_processes": 999},
     {"trust": TrustLevel.HOST},           # raise trust
 ])
 def test_restrict_widening_raises(kwargs):
-    parent = Policy(read=["/a"], network=["api.x"], max_memory_mb=512,
+    parent = Policy(read=["/a"], network=False, max_memory_mb=512,
                     max_processes=16, trust=TrustLevel.SANDBOXED)
     with pytest.raises(PolicyViolation):
         parent.restrict(**kwargs)
+
+
+def test_restrict_can_disable_network_not_enable():
+    assert Policy(network=True).restrict(network=False).network is False
+    with pytest.raises(PolicyViolation):
+        Policy(network=False).restrict(network=True)
+
+
+def test_network_toggle_defaults_off_and_coerces():
+    assert Policy().network is False
+    assert Policy(network=True).network is True
+    assert Policy(network="host").network is True
+    assert Policy(network="none").network is False
+    with pytest.raises(ValueError):
+        Policy(network="evil.com")        # old allowlist form is gone in v1
+    with pytest.raises(ValueError):
+        Policy(network=["a", "b"])         # a list is not a toggle
 
 def test_restrict_unknown_field_raises_typeerror():
     with pytest.raises(TypeError):
@@ -96,7 +113,7 @@ def test_no_escalate_method():
 # -- from_dict / to_dict round trip ---------------------------------------------------
 
 def test_round_trip():
-    p = Policy(read=["/p"], write=["/w"], network=["a.com:443"],
+    p = Policy(read=["/p"], write=["/w"], network=True,
                max_memory_mb=384, trust=TrustLevel.RESTRICTED)
     assert Policy.from_dict(p.to_dict()) == p
 
@@ -131,10 +148,6 @@ def test_path_prefix_is_not_fooled_by_sibling():
 def test_root_read_allows_everything():
     assert Policy(read=["/"]).allows_path_read("/etc/hosts")
 
-def test_allows_host_bare_and_ported():
-    p = Policy(network=["api.anthropic.com", "db:5432"])
-    assert p.allows_host("api.anthropic.com")          # bare host -> any port
-    assert p.allows_host("api.anthropic.com", 443)
-    assert p.allows_host("db", 5432)
-    assert not p.allows_host("db", 6000)               # wrong port
-    assert not p.allows_host("evil.com")
+def test_network_round_trips_as_bool():
+    assert Policy(network=True).to_dict()["network"] is True
+    assert Policy.from_dict({"network": "host"}).network is True
