@@ -4,6 +4,19 @@ All notable changes to **temenos** are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-06-07
+
+### Added
+- **Smart working-directory landing.** `temenos exec`, `temenos shell`, and `temenos claude`
+  now open in your current directory for a **project** box (the repo is mounted at its real
+  host path, so the host CWD exists inside the box) and at `/` for a **global** box. Boxes
+  carry a `default_cwd` so an agent's MCP `exec` calls land in the project dir too. Plumbed
+  through the Python `Box`, the daemon REST `create`, and the daemon client.
+- **`TERM` forwarding** into interactive sessions, so curses tools — `vim`, `less`, `top`,
+  `clear` — render correctly (defaults to `xterm-256color` when the host hasn't set one).
+- **A shell welcome banner** summarizing the box at a glance (name, id, network, image,
+  scratch/checkpoint mode, working dir); respects `NO_COLOR`.
+
 ## [0.2.0] — 2026-06-07
 
 First published release.
@@ -36,4 +49,5 @@ the project-aware CLI (`create`/`exec`/`ls`/`rm`/`audit`/`diff`/`serve`), `temen
 minimal/host-copy builders), storage volumes, filesystem checkpoint/restore, and
 systemd-backed memory limits.
 
+[0.3.0]: https://github.com/farizrahman4u/temenos/releases/tag/v0.3.0
 [0.2.0]: https://github.com/farizrahman4u/temenos/releases/tag/v0.2.0
