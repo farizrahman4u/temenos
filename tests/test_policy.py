@@ -8,9 +8,10 @@ from temenos import Policy, PolicyViolation, TrustLevel
 
 # -- construction / defaults ----------------------------------------------------------
 
-def test_default_policy_is_locked_down():
+def test_default_policy_fs_locked_network_open():
     p = Policy()
-    assert p.read == () and p.write == () and p.network is False
+    assert p.read == () and p.write == ()          # filesystem locked (overlay only)
+    assert p.network is True                        # v1 default: host network passthrough
     assert p.trust is TrustLevel.UNTRUSTED
     assert p.max_memory_mb == 256
 
@@ -92,8 +93,9 @@ def test_restrict_can_disable_network_not_enable():
         Policy(network=False).restrict(network=True)
 
 
-def test_network_toggle_defaults_off_and_coerces():
-    assert Policy().network is False
+def test_network_toggle_defaults_on_and_coerces():
+    assert Policy().network is True                 # v1 default is host passthrough
+    assert Policy(network=False).network is False
     assert Policy(network=True).network is True
     assert Policy(network="host").network is True
     assert Policy(network="none").network is False

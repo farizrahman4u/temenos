@@ -1,8 +1,11 @@
 """Policy — the semantic layer (Layer 0, pure data, no OS calls).
 
 A ``Policy`` describes what code executed inside a box may do. It is **frozen**
-(immutable, hashable) and **secure by default**: ``Policy()`` grants no network, no host
-writes (overlay only), and tight limits. You opt *in* to capability.
+(immutable, hashable). The *filesystem* is locked down by default — ``Policy()`` grants no
+host writes (overlay only) and tight resource limits — but **network defaults to full host
+passthrough** in v1 (a deliberate convenience default; set ``network=False`` to isolate a
+box, and do so for adversarial/multi-tenant workloads). You opt *in* to broader filesystem
+and resource capability.
 
 ``restrict()`` is the only way to derive a child policy, and it can never widen a
 capability — escalation raises ``PolicyViolation`` rather than being an operation.
@@ -77,11 +80,12 @@ class Policy:
     # Explicit provider-backed volumes (memory / disk / fsspec / custom) at chosen paths.
     mounts: tuple[Mount, ...] = ()
 
-    # Network — simple toggle (v1): False = no network (isolated netns), True = full
-    # host passthrough (no firewalling). Filtered allowlists are post-v1.
-    # ⚠️ network=True gives the box full host network reach (localhost, LAN, cloud
-    # metadata, arbitrary egress) — operator opt-in only; unsafe for adversarial tenants.
-    network: bool = False
+    # Network — simple toggle (v1): True = full host passthrough (no firewalling, the
+    # default), False = no network (isolated netns). Filtered allowlists are post-v1.
+    # ⚠️ The True default gives every box full host network reach (localhost, LAN, cloud
+    # metadata, arbitrary egress). Set network=False for adversarial/multi-tenant boxes;
+    # filtered egress is post-v1.
+    network: bool = True
 
     # Box base image (a runner-owned rootfs under $TEMENOS_DATA/images/<name>). None =
     # default host-`/usr`-bind base (read-only system). An image gives a writable system

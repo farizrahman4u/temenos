@@ -24,9 +24,9 @@ updates, and model API intact — while **banning every native host-touching too
 `Read`, `Write`, `Edit`, `WebFetch`, …) and routing its only execution path through a
 **box**: a rootless [gVisor](https://gvisor.dev) sandbox with a small, Python-native policy.
 
-A shell that tries to `rm -rf ~`, read `~/.ssh/id_rsa`, or `curl evil.com` is contained —
-not because the model promised to behave, but because the sandbox boundary won't let it. The
-agent is trusted; the *code it runs* is not. 🛡️
+A shell that tries to `rm -rf ~`, read `~/.ssh/id_rsa`, or overwrite `/usr/bin` is contained —
+not because the model promised to behave, but because the sandbox boundary won't let it (and
+`--no-net` cuts egress too). The agent is trusted; the *code it runs* is not. 🛡️
 
 And because that boundary is *structural* — a banned tool, not a model on its best behavior —
 it holds the same whether you supervise one agent by hand or run a thousand in allow-all mode.
@@ -44,8 +44,8 @@ Same box, any scale. [Scale it up](#-quickstart) when you need to.
   one repo, your overnight swarm, or a multi-tenant platform. Allow-all stays safe because the
   dangerous capability is *removed*, not merely discouraged.
 - 🔒 **Real isolation, not a syscall allowlist.** gVisor is a userspace kernel — the host
-  filesystem is invisible beyond what policy mounts, network is off by default, and most
-  kernel-CVE surface is intercepted before it reaches the host.
+  filesystem is invisible beyond what policy mounts, and most kernel-CVE surface is
+  intercepted before it reaches the host. Network is one flag (`--no-net` to fully isolate).
 - 🚫 **Sole-execution-path, enforced.** `temenos claude` denies native tools and exposes only
   `mcp__temenos__exec/read/write/list` over MCP, with `--strict-mcp-config` so a stray
   `.mcp.json` can't re-open a host-capable server.
@@ -57,7 +57,8 @@ Same box, any scale. [Scale it up](#-quickstart) when you need to.
 - 🐍 **A clean core API.** `Policy → Box → ExecResult`. The CLI and MCP server are thin layers
   over the same `Box` you can use directly from Python. Core has **zero runtime deps**.
 - 🧪 **Leak-tested.** A containment battery (`tests/leak/`) is the acceptance gate: no host
-  write, host secrets invisible, no network, `/proc` escape blocked, memory cap OOM-kills.
+  write, host secrets invisible, egress blocked when isolated, `/proc` escape blocked,
+  memory cap OOM-kills.
 
 ## 🤔 What it is
 
@@ -76,7 +77,7 @@ repo, or run it fifty times in parallel under one daemon — same boundary eithe
 | A VM-per-task sandbox | The agent stays on the **host** (auth, updates, model API intact). Spinning a VM per task throws all that away; temenos boxes only what runs. |
 | A seccomp / AppArmor filter | gVisor is a full userspace kernel, not a syscall allowlist bolted onto the host kernel — a categorically larger isolation boundary. |
 | A defense against a malicious *agent* | The threat model trusts the agent binary. temenos contains the untrusted **code the agent runs**, not the agent itself. |
-| A network firewall | v1 network is a toggle: **off** (isolated) or **full passthrough** (no filtering). Filtered per-host egress is post-v1 — and the load-bearing gap for adversarial fleets (see limits). |
+| A network firewall | v1 network is a toggle: **full passthrough by default** (no filtering) or **off** (`--no-net`, isolated). Filtered per-host egress is post-v1 — the load-bearing gap for adversarial fleets (see limits). |
 
 ## ⚖️ How it compares
 
@@ -106,7 +107,7 @@ you can run one of — or a fleet of. It builds on [gVisor](https://gvisor.dev) 
         temenos daemon  ──HTTP /mcp/<box-id>──►  Box (gVisor / runsc)
         (one per user,                            • host /usr,/etc bound read-only
          supervises every box)                    • repo mounted (live-writable by default)
-                                                  • network off · mem/cpu/pid capped
+                                                  • network on by default (--no-net isolates)
                                                   • writes land in an overlay
 ```
 
@@ -181,8 +182,8 @@ same name (with a warning).
 **Attach Claude Code:**
 
 ```bash
-temenos claude                       # box 'default' in this repo
-temenos claude --box review --net    # a separate box, network on
+temenos claude                       # box 'default' in this repo (network on by default)
+temenos claude --box review --no-net # a separate box, fully network-isolated
 temenos claude --dry-run             # print the exact claude invocation, don't launch
 temenos claude -- --model opus       # args after `--` go to claude
 ```
@@ -201,8 +202,9 @@ CLI and MCP server are thin layers over the same `Box`/`BoxManager` you can driv
 from temenos import Box, Policy
 from temenos.manager import BoxManager
 
-# one box, directly — secure by default (no network, no host writes, tight limits)
-with Box("demo", Policy(write=["/home/me/out"])) as box:
+# one box, directly — filesystem locked by default (no host writes, tight limits);
+# network is on by default, so pass network=False to isolate it
+with Box("demo", Policy(write=["/home/me/out"], network=False)) as box:
     box.write_file("/home/me/out/run.py", "print(6 * 7)\n")
     print(box.exec(["python3", "/home/me/out/run.py"]).stdout)   # "42\n"
     box.exec(["cat", "/etc/shadow"]).ok                          # -> False (host invisible)
@@ -261,7 +263,7 @@ in allow-all mode: the box is the enforcement, not the human.
 | `temenos claude [--box N] [flags] [-- claude-args]` | attach Claude with natives banned |
 | `temenos version` | print version |
 
-**Box-creation flags** (on `create` and `claude`): `--image NAME`, `--net`,
+**Box-creation flags** (on `create` and `claude`): `--image NAME`, `--net`/`--no-net`,
 `--scratch disk\|memory`, `--force-memory`, `--ephemeral-fs` (never checkpoint),
 `--no-autosave` (checkpoint only on close), `--ephemeral` (repo read-only),
 `--volume HOST:TARGET[:ro\|rw]`, `--memory MB`, `--cpu SECONDS`, `--global`.
@@ -278,17 +280,18 @@ guarantee is what lets you take humans out of the loop at fleet scale.
 |---|---|
 | Filesystem escape | **blocked** — host invisible beyond policy mounts; `/proc/1/root` is the box |
 | Host writes outside policy | **blocked** — `/usr`,`/etc` read-only; writes go to an overlay |
-| Network exfiltration | **blocked** when `network=off` (isolated netns) |
+| Network exfiltration | **blocked with `--no-net`** (isolated netns) — but network is **on by default** (see limits) |
 | Cross-box crosstalk | **blocked** — no writable mount is ever shared between boxes |
 | Kernel-CVE surface | **mostly blocked** — gVisor intercepts syscalls in userspace |
 | Memory/CPU/pid exhaustion | **enforced** via a per-box `systemd` scope (needs delegation — below) |
 
 **Limits you should know about:**
 
-- **Network is a toggle, not a firewall.** `--net` is **full host passthrough — no filtering**
-  (localhost, LAN, cloud metadata, arbitrary egress). This is the **load-bearing gap for
-  adversarial fleets**: a swarm of network-on boxes is an exfiltration surface multiplied by N.
-  Run swarm boxes `network=off` where you can; filtered per-host egress is post-v1.
+- **Network is on by default, and it's a toggle, not a firewall.** The default is **full host
+  passthrough — no filtering** (localhost, LAN, cloud metadata, arbitrary egress); `--no-net`
+  (`network=False`) fully isolates a box. This is the **load-bearing gap for adversarial
+  fleets**: a swarm of network-on boxes is an exfiltration surface multiplied by N. Run
+  untrusted/multi-tenant boxes with `--no-net`; filtered per-host egress is post-v1.
 - **Resource limits need systemd user-cgroup delegation.** Without it, limits **degrade to
   unenforced with a warning** (`temenos doctor` shows the mode) — don't run adversarial work
   there.

@@ -15,7 +15,8 @@ def main() -> None:
     # A scratch host dir the box may write to (writes persist to disk here).
     out = tempfile.mkdtemp(prefix="temenos-demo-")
 
-    # Secure by default: no network, no host writes except what we grant below.
+    # Filesystem locked by default (no host writes); network is ON by default, so we pass
+    # network=False here to isolate the box. We grant exactly one writable dir.
     policy = Policy(network=False, write=[out], max_memory_mb=256)
 
     with Box("demo", policy) as box:

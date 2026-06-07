@@ -163,13 +163,23 @@ def _load_box_policy(data_dir: str) -> Policy:
     return Policy()
 
 
-def _resolve_or_die(name: str, *, must_exist: bool):
-    from .project import resolve_box
-    r = resolve_box(name)
+def _resolve_scoped(name: str, *, glob: bool, must_exist: bool = True):
+    """Resolve a box in an EXPLICIT scope: project-local by default, global with --global.
+    No silent cross-scope fallthrough — local commands never touch global boxes and vice
+    versa (that's the separation). All not-found errors start with "no such box"."""
+    from .project import find_project, resolve_box
+    if glob:
+        r = resolve_box(name, prefer="global")
+        if must_exist and not r.exists:
+            raise TemenosError(f"no such box: {name!r} in global scope")
+        return r
+    if find_project() is None:
+        raise TemenosError(f"no such box: {name!r} — not inside a temenos project (no "
+                           f".temenos/); use --global to target a global box")
+    r = resolve_box(name, prefer="project")
     if must_exist and not r.exists:
-        raise TemenosError(f"no such box: {name!r} (create it with `temenos create {name}`)")
-    if r.shadows_global:
-        _warn(f"project box {name!r} shadows a global box of the same name")
+        hint = " (a global box of that name exists — try --global)" if r.shadows_global else ""
+        raise TemenosError(f"no such box: {name!r} in this project{hint}")
     return r
 
 
@@ -204,23 +214,43 @@ def _cmd_create(args: argparse.Namespace) -> int:
 
 
 def _cmd_box_ls(args: argparse.Namespace) -> int:
-    from .project import find_project, MARKER
+    """List boxes on disk in the requested scope (project by default, --global for global,
+    --all for both), annotated with running/stopped from the daemon."""
+    from .manager import box_id
+    from .project import MARKER, find_project, global_boxes_dir
     from .server.client import connect
+
+    want_global = args.glob or args.all
+    want_local = args.all or not args.glob
+    bases: list[tuple[str, str]] = []
+    if want_local:
+        proj = find_project()
+        if proj is not None:
+            bases.append(("project", os.path.join(proj, MARKER)))
+        elif not want_global:
+            print("(not inside a temenos project — use --global to list global boxes)")
+            return 0
+    if want_global:
+        bases.append(("global", global_boxes_dir()))
+
     client = connect()
-    if client is None:
-        print("(no running daemon — `temenos create` or `temenos serve` starts one)")
-        return 0
-    proj = find_project()
-    here = os.path.join(proj, MARKER) if proj else None
-    boxes = client.list_boxes()
-    if not boxes:
+    running = {b["id"] for b in client.list_boxes() if b.get("running")} if client else set()
+
+    rows = []
+    for scope, base in bases:
+        if not os.path.isdir(base):
+            continue
+        for entry in sorted(os.listdir(base)):
+            d = os.path.join(base, entry)
+            if os.path.exists(os.path.join(d, "config.json")):
+                bid = box_id(d)
+                rows.append((scope, entry, "running" if bid in running else "stopped", bid))
+    if not rows:
         print("(no boxes)")
         return 0
-    for b in boxes:
-        scope = "project" if here and b["dir"].startswith(here + os.sep) else "global"
+    for scope, name, state, bid in rows:
         mark = "*" if scope == "project" else " "
-        state = "running" if b["running"] else "stopped"
-        print(f"{mark} {b['name']:<20} {scope:<7} {state:<8} {b['id']}")
+        print(f"{mark} {name:<20} {scope:<7} {state:<8} {bid}")
     return 0
 
 
@@ -231,7 +261,7 @@ def _cmd_exec(args: argparse.Namespace) -> int:
         cmd = cmd[1:]
     if not cmd:
         raise TemenosError("nothing to run (usage: temenos exec <box> -- <cmd> [args...])")
-    r = _resolve_or_die(args.name, must_exist=True)
+    r = _resolve_scoped(args.name, glob=args.glob)
     client = connect_or_spawn()
     bid = _ensure_running(client, r.data_dir, args.name)
     res = client.exec(bid, cmd, cwd=args.cwd, timeout=args.timeout)
@@ -246,7 +276,7 @@ def _cmd_shell(args: argparse.Namespace) -> int:
     persist (same box); only the working dir is tracked client-side (no PTY — true
     interactive shells arrive with `temenos claude`/MCP in Phase 5)."""
     from .server.client import connect_or_spawn
-    r = _resolve_or_die(args.name, must_exist=True)
+    r = _resolve_scoped(args.name, glob=args.glob)
     client = connect_or_spawn()
     bid = _ensure_running(client, r.data_dir, args.name)
     print(f"temenos shell -> {args.name} (box {bid}); Ctrl-D to exit")
@@ -276,7 +306,7 @@ def _cmd_shell(args: argparse.Namespace) -> int:
 def _cmd_box_rm(args: argparse.Namespace) -> int:
     from .manager import box_id
     from .server.client import connect
-    r = _resolve_or_die(args.name, must_exist=True)
+    r = _resolve_scoped(args.name, glob=args.glob)
     client = connect()
     if client is not None:
         try:
@@ -292,7 +322,7 @@ def _cmd_box_rm(args: argparse.Namespace) -> int:
 def _cmd_audit(args: argparse.Namespace) -> int:
     from .manager import box_id
     from .server.client import connect
-    r = _resolve_or_die(args.name, must_exist=True)
+    r = _resolve_scoped(args.name, glob=args.glob)
     client = connect()
     if client is None:
         raise TemenosError("no running daemon — the audit log lives in the live box")
@@ -310,7 +340,7 @@ def _cmd_audit(args: argparse.Namespace) -> int:
 
 def _cmd_diff(args: argparse.Namespace) -> int:
     from .server.client import connect_or_spawn
-    r = _resolve_or_die(args.name, must_exist=True)
+    r = _resolve_scoped(args.name, glob=args.glob)
     client = connect_or_spawn()
     bid = _ensure_running(client, r.data_dir, args.name)
     files = client.writes(bid)
@@ -405,8 +435,9 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 def _add_box_flags(p: argparse.ArgumentParser) -> None:
     """Box-creation flags shared by `create` (and forwarded by `temenos claude` later)."""
     p.add_argument("--image", default=None, help="boot from a built image (see `temenos image`)")
-    p.add_argument("--net", "--network", dest="net", action="store_true",
-                   help="full host network passthrough (off by default)")
+    p.add_argument("--net", "--network", dest="net", default=True,
+                   action=argparse.BooleanOptionalAction,
+                   help="host network passthrough (ON by default; use --no-net to isolate)")
     p.add_argument("--scratch", choices=("disk", "memory"), default="disk",
                    help="root-overlay medium (disk=checkpointable default; memory=ephemeral)")
     p.add_argument("--force-memory", dest="force_memory", action="store_true",
@@ -463,11 +494,18 @@ def build_parser() -> argparse.ArgumentParser:
     _add_box_flags(cr)
     cr.set_defaults(func=_cmd_create)
 
-    bls = sub.add_parser("ls", help="list boxes the daemon is running")
+    def _scope(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--global", dest="glob", action="store_true",
+                            help="target a global box instead of this project's")
+
+    bls = sub.add_parser("ls", help="list boxes (this project's by default)")
+    bls.add_argument("--global", dest="glob", action="store_true", help="list global boxes")
+    bls.add_argument("--all", action="store_true", help="list both project and global boxes")
     bls.set_defaults(func=_cmd_box_ls)
 
     ex = sub.add_parser("exec", help="run a command in a box")
     ex.add_argument("name")
+    _scope(ex)
     ex.add_argument("--cwd", default=None, help="working dir inside the box")
     ex.add_argument("--timeout", type=float, default=None, help="seconds before kill")
     ex.add_argument("cmd", nargs=argparse.REMAINDER,
@@ -476,20 +514,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     sh = sub.add_parser("shell", help="open a minimal REPL in a box")
     sh.add_argument("name")
+    _scope(sh)
     sh.set_defaults(func=_cmd_shell)
 
     brm = sub.add_parser("rm", help="stop and delete a box")
     brm.add_argument("name")
+    _scope(brm)
     brm.add_argument("--keep-data", dest="keep_data", action="store_true",
                      help="stop the box but keep its data dir (checkpoint/overlay)")
     brm.set_defaults(func=_cmd_box_rm)
 
     au = sub.add_parser("audit", help="show a box's audit log")
     au.add_argument("name")
+    _scope(au)
     au.set_defaults(func=_cmd_audit)
 
     df = sub.add_parser("diff", help="list files under a box's write paths")
     df.add_argument("name")
+    _scope(df)
     df.set_defaults(func=_cmd_diff)
 
     cl = sub.add_parser("claude", help="attach a Claude Code session to a box (natives banned)")

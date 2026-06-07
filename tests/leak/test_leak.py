@@ -36,8 +36,8 @@ def test_host_files_outside_policy_are_invisible(tmp_path):
         assert "TOP-SECRET" not in box.exec(["cat", f"/proc/1/root{secret}"]).stdout
 
 
-def test_no_network_by_default():
-    with Box("leak-net", Policy(network=False)) as box:        # default: isolated netns
+def test_network_off_blocks_egress():
+    with Box("leak-net", Policy(network=False)) as box:        # opt-in isolation
         r = box.exec(["python3", "-c",
                       "import socket; socket.setdefaulttimeout(3);"
                       "socket.create_connection(('1.1.1.1', 53))"])

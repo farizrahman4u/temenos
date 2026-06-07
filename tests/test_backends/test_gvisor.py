@@ -154,7 +154,7 @@ def _ifaces(box):
 
 
 def test_network_off_is_isolated():
-    with _box("t-net-off") as box:                 # network defaults False
+    with _box("t-net-off", network=False) as box:  # explicit isolation (default is on)
         assert _ifaces(box) == {"lo"}              # only loopback, no egress path
 
 
